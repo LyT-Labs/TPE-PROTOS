@@ -14,7 +14,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
-#include <sys/signal.h>
+#include <signal.h>
 #include "selector.h"
 
 #define N(x) (sizeof(x)/sizeof((x)[0]))
@@ -50,6 +50,7 @@ selector_error(const selector_status status) {
 
 static void
 wake_handler(const int signal) {
+    (void)signal; // Suprimir warning de parámetro no usado
     // nada que hacer. está solo para interrumpir el select
 }
 

@@ -11,8 +11,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "selector.h"
-#include "buffer.h"
 #include "echo_server.h"
 
 #define ECHO_DEFAULT_PORT 1080
@@ -69,32 +67,53 @@ static void accept_handler(struct selector_key *key) {
         return;
     }
 
-    struct echo_conn *conn = malloc(sizeof(*conn));
+    // ESTO ES DEL ECHO-SERVER
+    // struct echo_conn *conn = malloc(sizeof(*conn));
+    // if (conn == NULL) {
+    //     perror("malloc echo_conn");
+    //     close(client_fd);
+    //     return;
+    // }
+
+    // conn->fd = client_fd;
+
+    // buffer_init(&conn->read_buf,  sizeof(conn->read_raw),  conn->read_raw);
+    // buffer_init(&conn->write_buf, sizeof(conn->write_raw), conn->write_raw);
+
+    // char client_ip[INET_ADDRSTRLEN];
+    // inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+
+    // printf("Nueva conexión desde %s:%d en fd %d\n",
+    //        client_ip, ntohs(client_addr.sin_port), client_fd);
+
+    // selector_status st = selector_register(key->s, client_fd, &echo_handler, OP_READ, conn);
+    // if (st != SELECTOR_SUCCESS) {
+    //     fprintf(stderr, "selector_register failed: %s\n",
+    //             selector_error(st));
+    //     close(client_fd);
+    //     free(conn);
+    //     return;
+    // }
+
+    // ESTO ES PARA PROBAR LA STM
+    struct socks5_conn *conn = socks5_new(client_fd);
     if (conn == NULL) {
-        perror("malloc echo_conn");
+        perror("socks5_new");
         close(client_fd);
         return;
     }
 
-    conn->fd = client_fd;
+    const struct fd_handler *h = socks5_get_handler();
 
-    buffer_init(&conn->read_buf,  sizeof(conn->read_raw),  conn->read_raw);
-    buffer_init(&conn->write_buf, sizeof(conn->write_raw), conn->write_raw);
-
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-
-    printf("Nueva conexión desde %s:%d en fd %d\n",
-           client_ip, ntohs(client_addr.sin_port), client_fd);
-
-    selector_status st = selector_register(key->s, client_fd, &echo_handler, OP_READ, conn);
+    selector_status st = selector_register(key->s, client_fd, h, OP_READ, conn);
     if (st != SELECTOR_SUCCESS) {
         fprintf(stderr, "selector_register failed: %s\n",
                 selector_error(st));
+        socks5_destroy(conn);
         close(client_fd);
-        free(conn);
         return;
     }
+
 }
 
 static void echo_read(struct selector_key *key) {

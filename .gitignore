@@ -1,0 +1,87 @@
+# Compiled object files
+*.o
+**/*.o
+*.obj
+*.elf
+*.out
+*.exe
+
+# Static / shared libraries
+*.a
+*.la
+*.lo
+*.so
+*.dylib
+
+# Precompiled headers
+*.gch
+
+# Build directories and artifacts
+build/
+bin/
+obj/
+dist/
+.libs/
+.release/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+Makefile.user
+
+# Autotools
+config.log
+config.status
+configure
+Makefile.in
+aclocal.m4
+autom4te.cache/
+
+# Coverage and profiling
+*.gcda
+*.gcno
+*.gcov
+lcov.info
+*.prof
+
+# Debug symbols and core dumps
+*.pdb
+*.idb
+*.dSYM/
+core
+core.*
+
+# Editor/IDE files
+*~
+*.swp
+*.swo
+.#*
+*.bak
+*.tmp
+.DS_Store
+.github/
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+
+# Tags and indexes
+tags
+TAGS
+cscope.*
+ctags
+
+# Logs and temporary files
+*.log
+*.pid
+
+# Archives and packages
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.iso
