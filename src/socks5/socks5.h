@@ -12,6 +12,7 @@
 #include "../helpers/stm.h"
 #include "../helpers/selector.h"
 #include "../hello/hello.h"
+#include "../request/request.h"
 
 // ============================================================================
 // MAQUINA DE ESTADOS SOCKS5
@@ -19,6 +20,8 @@
 enum socks5_state {
     S5_HELLO_READ = 0,
     S5_HELLO_WRITE,
+    S5_REQUEST_READ,
+    S5_REQUEST_WRITE,
     S5_DONE,
     S5_ERROR,
 };
@@ -29,13 +32,16 @@ enum socks5_state {
 // DEFINICION DE VARIABLES POR ESTADO
 // ============================================================================
 
-/** usado por HELLO_READ, HELLO_WRITE */
 struct hello_st {
-    /** buffer utilizado para I/O */
     buffer *rb, *wb;
     struct hello_parser parser;
-    /** el método de autenticación seleccionado */
     uint8_t method;
+};
+
+struct request_st {
+    buffer *rb;
+    buffer *wb;
+    struct request_parser parser;
 };
 
 // ============================================================================
@@ -55,7 +61,7 @@ struct socks5_conn {
     /** estados para el client_fd */
     union {
         struct hello_st hello;
-        // En el futuro: struct request_st request;
+        struct request_st request;
         // En el futuro: struct copy copy;
     } client;
 };

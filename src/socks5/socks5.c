@@ -1,5 +1,6 @@
 #include "socks5.h"
 #include "../hello/hello.h"
+#include "../request/request.h"
 
 static void hello_read_on_arrival(unsigned state, struct selector_key *key);
 static void hello_read_on_departure(unsigned state, struct selector_key *key);
@@ -8,6 +9,14 @@ static unsigned hello_read_on_read_ready(struct selector_key *key);
 static void hello_write_on_arrival(unsigned state, struct selector_key *key);
 static void hello_write_on_departure(unsigned state, struct selector_key *key);
 static unsigned hello_write_on_write_ready(struct selector_key *key);
+
+static void     request_read_on_arrival(unsigned state, struct selector_key *key);
+static void     request_read_on_departure(unsigned state, struct selector_key *key);
+static unsigned request_read_on_read_ready(struct selector_key *key);
+
+static void     request_write_on_arrival(unsigned state, struct selector_key *key);
+static void     request_write_on_departure(unsigned state, struct selector_key *key);
+static unsigned request_write_on_write_ready(struct selector_key *key);
 
 static void done_on_arrival(const unsigned state, struct selector_key *key);
 static void error_on_arrival(const unsigned state, struct selector_key *key);
@@ -30,6 +39,24 @@ static const struct state_definition socks5_states[] = {
         .on_departure     = hello_write_on_departure,
         .on_read_ready    = NULL,
         .on_write_ready   = hello_write_on_write_ready,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_REQUEST_READ] = {
+        .state            = S5_REQUEST_READ,
+        .on_arrival       = request_read_on_arrival,
+        .on_departure     = request_read_on_departure,
+        .on_read_ready    = request_read_on_read_ready,
+        .on_write_ready   = NULL,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_REQUEST_WRITE] = {
+        .state            = S5_REQUEST_WRITE,
+        .on_arrival       = request_write_on_arrival,
+        .on_departure     = request_write_on_departure,
+        .on_read_ready    = NULL,
+        .on_write_ready   = request_write_on_write_ready,
         .on_block_ready   = NULL,
     },
 
@@ -314,8 +341,102 @@ static unsigned hello_write_on_write_ready(struct selector_key *key) {
         return S5_ERROR;
     }
 
-    // TODO: pongo done porque estoy haciendo solo el greeting, después cambiar
-    // Más adelante aquí iría a S5_REQUEST_READ
+    // Pasar al estado REQUEST_READ
+    return S5_REQUEST_READ;
+}
+
+// ============================================================================
+// REQUEST_READ
+// ============================================================================
+
+static void request_read_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    printf("[REQUEST_READ] arrival (fd=%d)\n", key->fd);
+
+    d->rb = &conn->read_buf;
+    d->wb = &conn->write_buf;
+
+    request_parser_init(&d->parser);
+
+    selector_set_interest_key(key, OP_READ);
+}
+
+static void request_read_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+    
+    printf("[REQUEST_READ] departure (fd=%d)\n", key->fd);
+    
+    request_close(&d->parser);
+}
+
+static unsigned request_read_on_read_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    printf("[REQUEST_READ] read_ready (fd=%d)\n", key->fd);
+
+    size_t space;
+    uint8_t *ptr = buffer_write_ptr(d->rb, &space);
+
+    if (space == 0) {
+        fprintf(stderr, "[REQUEST_READ] buffer de lectura lleno (fd=%d)\n", key->fd);
+        return S5_ERROR;
+    }
+
+    ssize_t n = recv(key->fd, ptr, space, 0);
+    if (n == 0) {
+        printf("[REQUEST_READ] cliente cerró la conexión (fd=%d)\n", key->fd);
+        return S5_ERROR;
+    } else if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return S5_REQUEST_READ;
+        }
+        perror("[REQUEST_READ] recv");
+        return S5_ERROR;
+    }
+
+    buffer_write_adv(d->rb, (size_t)n);
+
+    bool error = false;
+    enum request_state st = request_consume(d->rb, &d->parser, &error);
+
+    if (request_is_done(st, &error)) {
+        if (error) {
+            return S5_ERROR;
+        }
+        if (selector_set_interest_key(key, OP_WRITE) != SELECTOR_SUCCESS) {
+            return S5_ERROR;
+        }
+        return S5_REQUEST_WRITE;
+    }
+
+    return S5_REQUEST_READ;
+}
+
+// ============================================================================
+// REQUEST_WRITE
+// ============================================================================
+
+static void request_write_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    printf("[REQUEST_WRITE] arrival (fd=%d)\n", key->fd);
+    selector_set_interest_key(key, OP_WRITE);
+}
+
+static void request_write_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    printf("[REQUEST_WRITE] departure (fd=%d)\n", key->fd);
+}
+
+static unsigned request_write_on_write_ready(struct selector_key *key) {
+    printf("[REQUEST_WRITE] write_ready (fd=%d)\n", key->fd);
+
+    // Todavía no enviamos respuesta real; devolver DONE como stub.
     return S5_DONE;
 }
 
