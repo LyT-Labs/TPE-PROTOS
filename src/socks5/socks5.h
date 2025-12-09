@@ -19,6 +19,11 @@
 enum socks5_state {
     S5_HELLO_READ = 0,
     S5_HELLO_WRITE,
+    S5_REQUEST_READ,
+    S5_REQUEST_WRITE,
+    S5_CONNECT,
+    S5_CONNECTING,
+    S5_TUNNEL,
     S5_DONE,
     S5_ERROR,
 };
@@ -52,6 +57,21 @@ struct socks5_conn {
     uint8_t read_raw[SOCKS5_BUFFER_SIZE];
     uint8_t write_raw[SOCKS5_BUFFER_SIZE];
 
+    // Datos del destino solicitado en el REQUEST
+    uint8_t  req_cmd;
+    uint8_t  req_atyp;
+    uint8_t  req_addr[256];
+    uint8_t  req_addr_len;
+    uint16_t req_port;
+
+    // Datos de conexión al origen
+    struct sockaddr_storage origin_addr;
+    socklen_t origin_addr_len;
+
+    // Buffers para el túnel
+    buffer origin_rbuf;
+    buffer origin_wbuf;
+
     /** estados para el client_fd */
     union {
         struct hello_st hello;
@@ -59,6 +79,9 @@ struct socks5_conn {
         // En el futuro: struct copy copy;
     } client;
 };
+
+// Handler para origin_fd
+extern const struct fd_handler origin_handler;
 
 struct socks5_conn *socks5_new(int client_fd);
 

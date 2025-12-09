@@ -1,5 +1,11 @@
 #include "socks5.h"
 #include "../hello/hello.h"
+#include "../request/request.h"
+#include <string.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <sys/socket.h>
 
 static void hello_read_on_arrival(unsigned state, struct selector_key *key);
 static void hello_read_on_departure(unsigned state, struct selector_key *key);
@@ -9,8 +15,27 @@ static void hello_write_on_arrival(unsigned state, struct selector_key *key);
 static void hello_write_on_departure(unsigned state, struct selector_key *key);
 static unsigned hello_write_on_write_ready(struct selector_key *key);
 
+static void     request_read_on_arrival(unsigned state, struct selector_key *key);
+static void     request_read_on_departure(unsigned state, struct selector_key *key);
+static unsigned request_read_on_read_ready(struct selector_key *key);
+
+static void     request_write_on_arrival(unsigned state, struct selector_key *key);
+static void     request_write_on_departure(unsigned state, struct selector_key *key);
+static unsigned request_write_on_write_ready(struct selector_key *key);
+
+static void     connect_on_arrival(unsigned state, struct selector_key *key);
+static unsigned connect_on_write_ready(struct selector_key *key);
+
+static void     connecting_on_arrival(unsigned state, struct selector_key *key);
+static unsigned connecting_on_write_ready(struct selector_key *key);
+
 static void done_on_arrival(const unsigned state, struct selector_key *key);
 static void error_on_arrival(const unsigned state, struct selector_key *key);
+
+static void socks5_read(struct selector_key *key);
+static void socks5_write(struct selector_key *key);
+static void socks5_block(struct selector_key *key);
+static void socks5_handle_close(struct selector_key *key);
 
 
 static const struct state_definition socks5_states[] = {
@@ -30,6 +55,51 @@ static const struct state_definition socks5_states[] = {
         .on_departure     = hello_write_on_departure,
         .on_read_ready    = NULL,
         .on_write_ready   = hello_write_on_write_ready,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_REQUEST_READ] = {
+        .state            = S5_REQUEST_READ,
+        .on_arrival       = request_read_on_arrival,
+        .on_departure     = request_read_on_departure,
+        .on_read_ready    = request_read_on_read_ready,
+        .on_write_ready   = NULL,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_REQUEST_WRITE] = {
+        .state            = S5_REQUEST_WRITE,
+        .on_arrival       = request_write_on_arrival,
+        .on_departure     = request_write_on_departure,
+        .on_read_ready    = NULL,
+        .on_write_ready   = request_write_on_write_ready,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_CONNECT] = {
+        .state            = S5_CONNECT,
+        .on_arrival       = connect_on_arrival,
+        .on_departure     = NULL,
+        .on_read_ready    = NULL,
+        .on_write_ready   = connect_on_write_ready,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_CONNECTING] = {
+        .state            = S5_CONNECTING,
+        .on_arrival       = connecting_on_arrival,
+        .on_departure     = NULL,
+        .on_read_ready    = NULL,
+        .on_write_ready   = connecting_on_write_ready,
+        .on_block_ready   = NULL,
+    },
+
+    [S5_TUNNEL] = {
+        .state            = S5_TUNNEL,
+        .on_arrival       = NULL,
+        .on_departure     = NULL,
+        .on_read_ready    = NULL,
+        .on_write_ready   = NULL,
         .on_block_ready   = NULL,
     },
 
@@ -95,55 +165,66 @@ void socks5_destroy(struct socks5_conn *conn) {
     free(conn);
 }
 
-static void socks5_handle_read(struct selector_key *key) {
+static void socks5_read(struct selector_key *key) {
     struct socks5_conn *conn = key->data;
     const unsigned st = stm_handler_read(&conn->stm, key);
 
     if (st == S5_DONE || st == S5_ERROR) {
-        selector_unregister_fd(key->s, key->fd);
-        key->data = NULL;
-        return;
+        socks5_handle_close(key);
     }
 }
 
-static void socks5_handle_write(struct selector_key *key) {
+static void socks5_write(struct selector_key *key) {
     struct socks5_conn *conn = key->data;
     const unsigned st = stm_handler_write(&conn->stm, key);
 
     if (st == S5_DONE || st == S5_ERROR) {
-        selector_unregister_fd(key->s, key->fd);
-        key->data = NULL;
-        return;
+        socks5_handle_close(key);
     }
 }
 
-static void socks5_handle_block(struct selector_key *key) {
+static void socks5_block(struct selector_key *key) {
     struct socks5_conn *conn = key->data;
     const unsigned st = stm_handler_block(&conn->stm, key);
 
     if (st == S5_DONE || st == S5_ERROR) {
-        selector_unregister_fd(key->s, key->fd);
-        key->data = NULL;
-        return;
+        socks5_handle_close(key);
     }
 }
 
 static void socks5_handle_close(struct selector_key *key) {
     struct socks5_conn *conn = key->data;
 
-    printf("[CLOSE] cerrando fd=%d\n", key->fd);
-
-    if (conn != NULL) {
-        socks5_destroy(conn);
-        key->data = NULL;
+    if (conn == NULL) {
+        return;
     }
+
+    printf("[CLOSE] cerrando conexión (fd=%d)\n", key->fd);
+
+    // Desregistrar y cerrar origin_fd si existe
+    if (conn->origin_fd != -1) {
+        selector_unregister_fd(key->s, conn->origin_fd);
+        close(conn->origin_fd);
+        conn->origin_fd = -1;
+    }
+
+    // Desregistrar y cerrar client_fd si existe
+    if (conn->client_fd != -1) {
+        selector_unregister_fd(key->s, conn->client_fd);
+        close(conn->client_fd);
+        conn->client_fd = -1;
+    }
+
+    // Liberar la estructura
+    free(conn);
+    key->data = NULL;
 }
 
 
 static const struct fd_handler socks5_handler = {
-    .handle_read  = socks5_handle_read,
-    .handle_write = socks5_handle_write,
-    .handle_block = socks5_handle_block,
+    .handle_read  = socks5_read,
+    .handle_write = socks5_write,
+    .handle_block = socks5_block,
     .handle_close = socks5_handle_close,
 };
 
@@ -344,6 +425,23 @@ static void request_read_on_departure(unsigned state, struct selector_key *key) 
     
     printf("[REQUEST_READ] departure (fd=%d)\n", key->fd);
     
+    // Copiar los datos parseados del REQUEST hacia la conexión
+    conn->req_cmd      = d->parser.cmd;
+    conn->req_atyp     = d->parser.atyp;
+    conn->req_port     = d->parser.port;
+    conn->req_addr_len = d->parser.addr_len;
+
+    // Copiar la dirección (IPv4, IPv6 o FQDN)
+    if (conn->req_addr_len > sizeof(conn->req_addr)) {
+        conn->req_addr_len = sizeof(conn->req_addr);
+    }
+    if (conn->req_addr_len > 0) {
+        memcpy(conn->req_addr, d->parser.addr, conn->req_addr_len);
+    }
+
+    printf("[REQUEST_READ] cmd=0x%02x atyp=0x%02x port=%u (fd=%d)\n",
+           conn->req_cmd, conn->req_atyp, conn->req_port, key->fd);
+    
     request_close(&d->parser);
 }
 
@@ -412,17 +510,9 @@ static unsigned request_read_on_read_ready(struct selector_key *key) {
 
 static void request_write_on_arrival(unsigned state, struct selector_key *key) {
     (void)state;
-    printf("[REQUEST_WRITE] arrival (fd=%d)\n", key->fd);
+    printf("[REQUEST_WRITE] arrival (fd=%d) - pasando directo a CONNECT\n", key->fd);
     
-    struct socks5_conn *conn = key->data;
-    struct request_st *d = &conn->client.request;
-
-    // Armar respuesta SOCKS5 de éxito por ahora
-    uint8_t addr[4] = {0x00, 0x00, 0x00, 0x00};
-    if (request_marshall_reply(d->wb, 0x00, 0x01, addr, 0) < 0) {
-        return; // error: dejamos que la FSM lo trate como error más tarde
-    }
-
+    // Ya no enviamos el REP aquí, pasamos directo a CONNECT
     selector_set_interest_key(key, OP_WRITE);
 }
 
@@ -432,6 +522,237 @@ static void request_write_on_departure(unsigned state, struct selector_key *key)
 }
 
 static unsigned request_write_on_write_ready(struct selector_key *key) {
+    (void)key;
+    // Ya no enviamos nada aquí, pasamos directo a CONNECT
+    return S5_CONNECT;
+}
+
+// ============================================================================
+// CONNECT
+// ============================================================================
+
+static void connect_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+
+    printf("[CONNECT] arrival (fd=%d)\n", key->fd);
+
+    // 1) validar comando
+    if (conn->req_cmd != 0x01) {
+        printf("[CONNECT] cmd no soportado (0x%02x)\n", conn->req_cmd);
+        // Enviar REP = 0x07 (Command not supported)
+        struct request_st *d = &conn->client.request;
+        uint8_t addr[4] = {0, 0, 0, 0};
+        request_marshall_reply(d->wb, 0x07, 0x01, addr, 0);
+        selector_set_interest_key(key, OP_WRITE);
+        return;
+    }
+
+    // 2) resolver dirección (bloqueante)
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int gai = 0;
+
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%u", conn->req_port);
+
+    if (conn->req_atyp == 0x03) {
+        // FQDN: el addr es un string NO terminado en \0 → crearlo
+        char host[256];
+        memcpy(host, conn->req_addr, conn->req_addr_len);
+        host[conn->req_addr_len] = '\0';
+
+        printf("[CONNECT] resolviendo FQDN: %s:%s\n", host, portstr);
+        gai = getaddrinfo(host, portstr, &hints, &result);
+    } else if (conn->req_atyp == 0x01) {
+        // IPv4
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, conn->req_addr, ip, sizeof(ip));
+        printf("[CONNECT] resolviendo IPv4: %s:%s\n", ip, portstr);
+        gai = getaddrinfo(ip, portstr, &hints, &result);
+    } else if (conn->req_atyp == 0x04) {
+        // IPv6
+        char ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, conn->req_addr, ip, sizeof(ip));
+        printf("[CONNECT] resolviendo IPv6: %s:%s\n", ip, portstr);
+        gai = getaddrinfo(ip, portstr, &hints, &result);
+    } else {
+        printf("[CONNECT] ATYP no soportado (0x%02x)\n", conn->req_atyp);
+        struct request_st *d = &conn->client.request;
+        uint8_t addr[4] = {0, 0, 0, 0};
+        request_marshall_reply(d->wb, 0x08, 0x01, addr, 0);
+        selector_set_interest_key(key, OP_WRITE);
+        return;
+    }
+
+    if (gai != 0 || result == NULL) {
+        printf("[CONNECT] getaddrinfo fallo: %s\n", gai_strerror(gai));
+        struct request_st *d = &conn->client.request;
+        uint8_t addr[4] = {0, 0, 0, 0};
+        request_marshall_reply(d->wb, 0x01, 0x01, addr, 0);
+        selector_set_interest_key(key, OP_WRITE);
+        return;
+    }
+
+    // copiar dirección a conn (el puerto ya viene resuelto de getaddrinfo)
+    memcpy(&conn->origin_addr, result->ai_addr, result->ai_addrlen);
+    conn->origin_addr_len = result->ai_addrlen;
+
+    freeaddrinfo(result);
+
+    // 3) crear origin_fd
+    int fd = socket(conn->origin_addr.ss_family, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("[CONNECT] socket");
+        struct request_st *d = &conn->client.request;
+        uint8_t addr[4] = {0, 0, 0, 0};
+        request_marshall_reply(d->wb, 0x01, 0x01, addr, 0);
+        selector_set_interest_key(key, OP_WRITE);
+        return;
+    }
+
+    // no bloqueante
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
+        perror("[CONNECT] fcntl O_NONBLOCK");
+        close(fd);
+        struct request_st *d = &conn->client.request;
+        uint8_t addr[4] = {0, 0, 0, 0};
+        request_marshall_reply(d->wb, 0x01, 0x01, addr, 0);
+        selector_set_interest_key(key, OP_WRITE);
+        return;
+    }
+
+    conn->origin_fd = fd;
+
+    // 4) iniciar connect
+    int r = connect(fd, (struct sockaddr *)&conn->origin_addr, conn->origin_addr_len);
+    if (r == 0) {
+        printf("[CONNECT] connect inmediato OK\n");
+        // Conexión inmediata → registrar origin_fd con socks5_handler
+        if (selector_register(key->s, fd, &socks5_handler, OP_WRITE, conn) != SELECTOR_SUCCESS) {
+            perror("[CONNECT] selector_register");
+            close(fd);
+            conn->origin_fd = -1;
+            struct request_st *d = &conn->client.request;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            request_marshall_reply(d->wb, 0x01, 0x01, addr, 0);
+            selector_set_interest_key(key, OP_WRITE);
+            return;
+        }
+        // El write_ready handler hará la transición a CONNECTING
+        selector_set_interest_key(key, OP_NOOP);
+        return;
+    }
+
+    if (r < 0 && errno == EINPROGRESS) {
+        printf("[CONNECT] connect en progreso (fd=%d → origin_fd=%d)\n", key->fd, fd);
+        // registrar origin_fd con socks5_handler para OP_WRITE
+        if (selector_register(key->s, fd, &socks5_handler, OP_WRITE, conn) != SELECTOR_SUCCESS) {
+            perror("[CONNECT] selector_register");
+            close(fd);
+            conn->origin_fd = -1;
+            struct request_st *d = &conn->client.request;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            request_marshall_reply(d->wb, 0x01, 0x01, addr, 0);
+            selector_set_interest_key(key, OP_WRITE);
+            return;
+        }
+        // Dejar de monitorear el client_fd por ahora
+        selector_set_interest_key(key, OP_NOOP);
+        return;
+    }
+
+    printf("[CONNECT] error inmediato: %s\n", strerror(errno));
+    close(fd);
+    conn->origin_fd = -1;
+    struct request_st *d = &conn->client.request;
+    uint8_t addr[4] = {0, 0, 0, 0};
+    request_marshall_reply(d->wb, 0x01, 0x01, addr, 0);
+    selector_set_interest_key(key, OP_WRITE);
+}
+
+static unsigned connect_on_write_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    
+    // Este handler se llama cuando origin_fd está listo para escritura
+    // Verificar si el evento viene del origin_fd
+    if (key->fd == conn->origin_fd) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+
+        if (getsockopt(conn->origin_fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+            perror("[CONNECT] getsockopt");
+            return S5_ERROR;
+        }
+
+        if (err != 0) {
+            printf("[CONNECT] fallo connect: %s\n", strerror(err));
+            return S5_ERROR;
+        }
+
+        printf("[CONNECT] conectado OK (origin_fd=%d), transición a CONNECTING\n", conn->origin_fd);
+        
+        // Cambiar interés del client_fd para enviar el REP
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        
+        return S5_CONNECTING;
+    }
+    
+    // Si el evento viene del client_fd (no debería pasar), mantener el estado
+    return S5_CONNECT;
+}
+
+
+
+// ============================================================================
+// CONNECTING
+// ============================================================================
+
+static void connecting_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    printf("[CONNECTING] arrival (fd=%d)\n", key->fd);
+
+    // obtener ip/puerto local del origin_fd
+    struct sockaddr_storage local;
+    socklen_t len = sizeof(local);
+    if (getsockname(conn->origin_fd, (struct sockaddr *)&local, &len) < 0) {
+        perror("[CONNECTING] getsockname");
+        // En caso de error, enviar respuesta con 0.0.0.0:0
+        uint8_t addr[4] = {0, 0, 0, 0};
+        request_marshall_reply(d->wb, 0x00, 0x01, addr, 0);
+    } else {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        uint16_t port = 0;
+
+        if (local.ss_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in*)&local;
+            memcpy(addr, &sin->sin_addr, 4);
+            port = ntohs(sin->sin_port);
+        } else if (local.ss_family == AF_INET6) {
+            // Para IPv6, podríamos enviar 0.0.0.0 o intentar otro formato
+            // Por simplicidad, usamos 0.0.0.0
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6*)&local;
+            port = ntohs(sin6->sin6_port);
+        }
+
+        printf("[CONNECTING] BND.ADDR=%d.%d.%d.%d BND.PORT=%u\n", 
+               addr[0], addr[1], addr[2], addr[3], port);
+        request_marshall_reply(d->wb, 0x00, 0x01, addr, port);
+    }
+
+    // Cambiar el interés al client_fd para enviar la respuesta
+    // El origin_fd está conectado pero aún no lo usaremos (túnel en siguiente paso)
+    selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+}
+
+static unsigned connecting_on_write_ready(struct selector_key *key) {
     struct socks5_conn *conn = key->data;
     struct request_st *d = &conn->client.request;
 
@@ -439,23 +760,33 @@ static unsigned request_write_on_write_ready(struct selector_key *key) {
     uint8_t *ptr = buffer_read_ptr(d->wb, &n);
 
     if (n == 0) {
+        printf("[CONNECTING] respuesta enviada completa, pasando a TUNNEL\n");
         buffer_reset(d->wb);
-        return S5_DONE;
+        return S5_TUNNEL;
     }
 
     ssize_t sent = send(key->fd, ptr, n, 0);
-    if (sent <= 0) {
+    if (sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return S5_CONNECTING;
+        }
+        perror("[CONNECTING] send");
+        return S5_ERROR;
+    }
+
+    if (sent == 0) {
         return S5_ERROR;
     }
 
     buffer_read_adv(d->wb, sent);
 
     if (!buffer_can_read(d->wb)) {
+        printf("[CONNECTING] respuesta enviada completa, pasando a TUNNEL\n");
         buffer_reset(d->wb);
-        return S5_DONE;
+        return S5_TUNNEL;
     }
 
-    return S5_REQUEST_WRITE;
+    return S5_CONNECTING;
 }
 
 // ============================================================================
