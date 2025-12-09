@@ -32,9 +32,14 @@ static unsigned connecting_on_write_ready(struct selector_key *key);
 static void done_on_arrival(const unsigned state, struct selector_key *key);
 static void error_on_arrival(const unsigned state, struct selector_key *key);
 
+static void     tunnel_on_arrival(unsigned state, struct selector_key *key);
+static unsigned tunnel_read(struct selector_key *key);
+static unsigned tunnel_write(struct selector_key *key);
+
 static void socks5_read(struct selector_key *key);
 static void socks5_write(struct selector_key *key);
 static void socks5_block(struct selector_key *key);
+static void socks5_close(struct selector_key *key);
 static void socks5_handle_close(struct selector_key *key);
 
 
@@ -96,10 +101,10 @@ static const struct state_definition socks5_states[] = {
 
     [S5_TUNNEL] = {
         .state            = S5_TUNNEL,
-        .on_arrival       = NULL,
+        .on_arrival       = tunnel_on_arrival,
         .on_departure     = NULL,
-        .on_read_ready    = NULL,
-        .on_write_ready   = NULL,
+        .on_read_ready    = tunnel_read,
+        .on_write_ready   = tunnel_write,
         .on_block_ready   = NULL,
     },
 
@@ -139,6 +144,34 @@ struct socks5_conn *socks5_new(int client_fd) {
                 sizeof(conn->write_raw),
                 conn->write_raw);
 
+    // Inicializar buffers para el túnel
+    buffer_init(&conn->client_to_origin_buf,
+                sizeof(conn->client_to_origin_raw),
+                conn->client_to_origin_raw);
+    buffer_init(&conn->origin_to_client_buf,
+                sizeof(conn->origin_to_client_raw),
+                conn->origin_to_client_raw);
+
+    // Inicializar flags de EOF
+    conn->client_read_closed = false;
+    conn->origin_read_closed = false;
+
+    // Inicializar canal cliente → origin
+    conn->chan_c2o.src_fd = &conn->client_fd;
+    conn->chan_c2o.dst_fd = &conn->origin_fd;
+    conn->chan_c2o.src_buffer = NULL;
+    conn->chan_c2o.dst_buffer = &conn->client_to_origin_buf;
+    conn->chan_c2o.read_enabled = true;
+    conn->chan_c2o.write_enabled = false;
+
+    // Inicializar canal origin → cliente
+    conn->chan_o2c.src_fd = &conn->origin_fd;
+    conn->chan_o2c.dst_fd = &conn->client_fd;
+    conn->chan_o2c.src_buffer = NULL;
+    conn->chan_o2c.dst_buffer = &conn->origin_to_client_buf;
+    conn->chan_o2c.read_enabled = true;
+    conn->chan_o2c.write_enabled = false;
+
     conn->stm.initial   = S5_HELLO_READ;
     conn->stm.max_state = (sizeof(socks5_states) / sizeof(socks5_states[0])) - 1;
     conn->stm.states    = socks5_states;
@@ -170,7 +203,7 @@ static void socks5_read(struct selector_key *key) {
     const unsigned st = stm_handler_read(&conn->stm, key);
 
     if (st == S5_DONE || st == S5_ERROR) {
-        socks5_handle_close(key);
+        socks5_close(key);
     }
 }
 
@@ -179,7 +212,7 @@ static void socks5_write(struct selector_key *key) {
     const unsigned st = stm_handler_write(&conn->stm, key);
 
     if (st == S5_DONE || st == S5_ERROR) {
-        socks5_handle_close(key);
+        socks5_close(key);
     }
 }
 
@@ -188,44 +221,45 @@ static void socks5_block(struct selector_key *key) {
     const unsigned st = stm_handler_block(&conn->stm, key);
 
     if (st == S5_DONE || st == S5_ERROR) {
-        socks5_handle_close(key);
+        socks5_close(key);
     }
 }
 
-static void socks5_handle_close(struct selector_key *key) {
+static void socks5_close(struct selector_key *key) {
     struct socks5_conn *conn = key->data;
-
     if (conn == NULL) {
         return;
     }
 
-    printf("[CLOSE] cerrando conexión (fd=%d)\n", key->fd);
+    int client_fd = conn->client_fd;
+    int origin_fd = conn->origin_fd;
+
+    // Marcar los fd como no válidos
+    conn->client_fd = -1;
+    conn->origin_fd = -1;
 
     // Desregistrar y cerrar origin_fd si existe
-    if (conn->origin_fd != -1) {
-        selector_unregister_fd(key->s, conn->origin_fd);
-        close(conn->origin_fd);
-        conn->origin_fd = -1;
+    if (origin_fd != -1) {
+        selector_unregister_fd(key->s, origin_fd);
+        // selector_unregister_fd ya hace close() internamente
+        close(origin_fd);
     }
 
     // Desregistrar y cerrar client_fd si existe
-    if (conn->client_fd != -1) {
-        selector_unregister_fd(key->s, conn->client_fd);
-        close(conn->client_fd);
-        conn->client_fd = -1;
+    if (client_fd != -1) {
+        selector_unregister_fd(key->s, client_fd);
+        close(client_fd);
     }
 
-    // Liberar la estructura
     free(conn);
     key->data = NULL;
 }
-
 
 static const struct fd_handler socks5_handler = {
     .handle_read  = socks5_read,
     .handle_write = socks5_write,
     .handle_block = socks5_block,
-    .handle_close = socks5_handle_close,
+    .handle_close = NULL,
 };
 
 const struct fd_handler *socks5_get_handler(void) {
@@ -787,6 +821,164 @@ static unsigned connecting_on_write_ready(struct selector_key *key) {
     }
 
     return S5_CONNECTING;
+}
+
+// ============================================================================
+// TUNNEL - Sistema de canales bidireccionales
+// ============================================================================
+
+static void tunnel_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+
+    printf("[TUNNEL] arrival (fd=%d)\n", key->fd);
+    printf("[TUNNEL] iniciando túnel bidireccional client_fd=%d ⇄ origin_fd=%d\n",
+           conn->client_fd, conn->origin_fd);
+
+    // Habilitar lectura en ambos extremos
+    selector_set_interest(key->s, conn->client_fd, OP_READ);
+    selector_set_interest(key->s, conn->origin_fd, OP_READ);
+
+    // Los canales ya están inicializados en socks5_new
+    conn->chan_c2o.read_enabled = true;
+    conn->chan_c2o.write_enabled = false;
+    conn->chan_o2c.read_enabled = true;
+    conn->chan_o2c.write_enabled = false;
+}
+
+static void channel_read(struct selector_key *key, struct data_channel *ch) {
+    // Verificar si la lectura está habilitada
+    if (!ch->read_enabled) {
+        return;
+    }
+
+    // Obtener espacio disponible en el buffer de destino
+    size_t space;
+    uint8_t *write_ptr = buffer_write_ptr(ch->dst_buffer, &space);
+
+    if (space == 0) {
+        // Buffer lleno, deshabilitar lectura temporalmente
+        selector_set_interest(key->s, *ch->src_fd, OP_NOOP);
+        return;
+    }
+
+    // Leer datos del file descriptor origen
+    ssize_t n = recv(*ch->src_fd, write_ptr, space, 0);
+
+    if (n == 0) {
+        // EOF: cerrar este lado del canal
+        ch->read_enabled = false;
+        shutdown(*ch->src_fd, SHUT_RD);
+        if (*ch->dst_fd != -1) {
+            shutdown(*ch->dst_fd, SHUT_WR);
+        }
+        return;
+    }
+
+    if (n < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            // Error real, marcar para cerrar
+            ch->read_enabled = false;
+        }
+        return;
+    }
+
+    // Avanzar el buffer con los datos leídos
+    buffer_write_adv(ch->dst_buffer, (size_t)n);
+
+    // Habilitar escritura en el destino si hay datos pendientes
+    if (buffer_can_read(ch->dst_buffer)) {
+        selector_set_interest(key->s, *ch->dst_fd, OP_WRITE | OP_READ);
+        ch->write_enabled = true;
+    }
+}
+
+static void channel_write(struct selector_key *key, struct data_channel *ch) {
+    // Verificar si hay datos para escribir
+    size_t available;
+    uint8_t *read_ptr = buffer_read_ptr(ch->dst_buffer, &available);
+
+    if (available == 0) {
+        // No hay datos, deshabilitar escritura
+        selector_set_interest(key->s, *ch->dst_fd, OP_READ);
+        ch->write_enabled = false;
+
+        // Reactivar lectura en el origen si estaba deshabilitada
+        if (ch->read_enabled) {
+            selector_set_interest(key->s, *ch->src_fd, OP_READ);
+        }
+        return;
+    }
+
+    // Enviar datos al file descriptor destino
+    ssize_t n = send(*ch->dst_fd, read_ptr, available, MSG_NOSIGNAL);
+
+    if (n < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            // Error real
+            ch->write_enabled = false;
+        }
+        return;
+    }
+
+    // Avanzar el buffer
+    buffer_read_adv(ch->dst_buffer, (size_t)n);
+
+    // Actualizar intereses según el estado del buffer
+    if (buffer_can_read(ch->dst_buffer)) {
+        // Aún hay datos, mantener escritura habilitada
+        selector_set_interest(key->s, *ch->dst_fd, OP_WRITE | OP_READ);
+    } else {
+        // Buffer vacío, deshabilitar escritura y reactivar lectura
+        selector_set_interest(key->s, *ch->dst_fd, OP_READ);
+        ch->write_enabled = false;
+
+        if (ch->read_enabled) {
+            selector_set_interest(key->s, *ch->src_fd, OP_READ);
+        }
+    }
+}
+
+static unsigned tunnel_read(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+
+    // Determinar qué canal debe leer según el fd que disparó el evento
+    if (key->fd == conn->client_fd) {
+        channel_read(key, &conn->chan_c2o);
+    } else if (key->fd == conn->origin_fd) {
+        channel_read(key, &conn->chan_o2c);
+    }
+
+    // Verificar si ambos canales están cerrados y buffers vacíos
+    if (!conn->chan_c2o.read_enabled && 
+        !conn->chan_o2c.read_enabled &&
+        !buffer_can_read(&conn->client_to_origin_buf) &&
+        !buffer_can_read(&conn->origin_to_client_buf)) {
+        return S5_DONE;
+    }
+
+    return S5_TUNNEL;
+}
+
+static unsigned tunnel_write(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+
+    // Determinar qué canal debe escribir según el fd que disparó el evento
+    if (key->fd == *conn->chan_c2o.dst_fd) {
+        channel_write(key, &conn->chan_c2o);
+    } else if (key->fd == *conn->chan_o2c.dst_fd) {
+        channel_write(key, &conn->chan_o2c);
+    }
+
+    // Verificar si ambos canales están cerrados y buffers vacíos
+    if (!conn->chan_c2o.read_enabled && 
+        !conn->chan_o2c.read_enabled &&
+        !buffer_can_read(&conn->client_to_origin_buf) &&
+        !buffer_can_read(&conn->origin_to_client_buf)) {
+        return S5_DONE;
+    }
+
+    return S5_TUNNEL;
 }
 
 // ============================================================================

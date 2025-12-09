@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include "../helpers/buffer.h"
 #include "../helpers/stm.h"
 #include "../helpers/selector.h"
@@ -43,6 +44,22 @@ struct hello_st {
     uint8_t method;
 };
 
+struct request_st {
+    buffer *rb;
+    buffer *wb;
+    struct request_parser parser;
+};
+
+// Estructura para manejo de canales de datos bidireccionales
+struct data_channel {
+    int *src_fd;          // el que genera los datos
+    int *dst_fd;          // el que recibe los datos
+    buffer *src_buffer;   // desde donde leer
+    buffer *dst_buffer;   // hacia donde escribir
+    bool read_enabled;    // si debemos leer de src_fd
+    bool write_enabled;   // si debemos escribir en dst_fd
+};
+
 // ============================================================================
 // ESTRUCTURA DE CONEXION SOCKS5
 // ============================================================================
@@ -68,9 +85,16 @@ struct socks5_conn {
     struct sockaddr_storage origin_addr;
     socklen_t origin_addr_len;
 
-    // Buffers para el túnel
-    buffer origin_rbuf;
-    buffer origin_wbuf;
+    // Buffers para el túnel (cliente ⇄ origin)
+    buffer client_to_origin_buf;
+    uint8_t client_to_origin_raw[4096];
+
+    buffer origin_to_client_buf;
+    uint8_t origin_to_client_raw[4096];
+
+    // Flags para manejo de EOF en el túnel
+    bool client_read_closed;
+    bool origin_read_closed;
 
     /** estados para el client_fd */
     union {
@@ -78,7 +102,12 @@ struct socks5_conn {
         // En el futuro: struct request_st request;
         // En el futuro: struct copy copy;
     } client;
+
+    // Canales de datos bidireccionales para el túnel
+    struct data_channel chan_c2o;   // cliente → origin
+    struct data_channel chan_o2c;   // origin → cliente
 };
+
 
 // Handler para origin_fd
 extern const struct fd_handler origin_handler;
