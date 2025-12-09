@@ -177,13 +177,31 @@ bool request_is_done(enum request_state st, bool *errored) {
 }
 
 int request_marshall_reply(buffer *b, uint8_t rep, uint8_t atyp, const uint8_t *addr, uint16_t port) {
-    (void)b;
-    (void)rep;
-    (void)atyp;
-    (void)addr;
-    (void)port;
-    // Implementación real vendrá más adelante
-    return -1;
+    size_t space;
+    uint8_t *ptr = buffer_write_ptr(b, &space);
+
+    // Necesitamos al menos 10 bytes: VER(1) REP(1) RSV(1) ATYP(1) ADDR(4) PORT(2)
+    if (space < 10) {
+        return -1;
+    }
+
+    ptr[0] = 0x05;      // VER
+    ptr[1] = rep;       // REP
+    ptr[2] = 0x00;      // RSV
+    ptr[3] = atyp;      // ATYP
+
+    // IPv4 address (4 bytes)
+    ptr[4] = addr[0];
+    ptr[5] = addr[1];
+    ptr[6] = addr[2];
+    ptr[7] = addr[3];
+
+    // PORT (big endian)
+    ptr[8] = (uint8_t)((port >> 8) & 0xFF);
+    ptr[9] = (uint8_t)(port & 0xFF);
+
+    buffer_write_adv(b, 10);
+    return 0;
 }
 
 void request_close(struct request_parser *p) {

@@ -314,9 +314,148 @@ static unsigned hello_write_on_write_ready(struct selector_key *key) {
         return S5_ERROR;
     }
 
-    // TODO: pongo done porque estoy haciendo solo el greeting, después cambiar
-    // Más adelante aquí iría a S5_REQUEST_READ
-    return S5_DONE;
+    // Pasar al estado REQUEST_READ
+    return S5_REQUEST_READ;
+}
+
+// ============================================================================
+// REQUEST_READ
+// ============================================================================
+
+static void request_read_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    printf("[REQUEST_READ] arrival (fd=%d)\n", key->fd);
+
+    d->rb = &conn->read_buf;
+    d->wb = &conn->write_buf;
+
+    request_parser_init(&d->parser);
+
+    selector_set_interest_key(key, OP_READ);
+}
+
+static void request_read_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+    
+    printf("[REQUEST_READ] departure (fd=%d)\n", key->fd);
+    
+    request_close(&d->parser);
+}
+
+static unsigned request_read_on_read_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    printf("[REQUEST_READ] read_ready (fd=%d)\n", key->fd);
+
+    while (true) {
+        // 1) Intentar parsear todo lo que ya está en el buffer
+        bool error = false;
+        enum request_state st = request_consume(d->rb, &d->parser, &error);
+
+        if (request_is_done(st, &error)) {
+            if (error) {
+                return S5_ERROR;
+            }
+            if (selector_set_interest_key(key, OP_WRITE) != SELECTOR_SUCCESS) {
+                return S5_ERROR;
+            }
+            return S5_REQUEST_WRITE;
+        }
+
+        if (buffer_can_read(d->rb)) {
+            continue;
+        }
+
+        // 2) Si ya no hay bytes en el buffer, recién ahí intentamos leer más
+        size_t space;
+        uint8_t *ptr = buffer_write_ptr(d->rb, &space);
+
+        if (space == 0) {
+            fprintf(stderr, "[REQUEST_READ] buffer de lectura lleno (fd=%d)\n", key->fd);
+            return S5_ERROR;
+        }
+
+        ssize_t n = recv(key->fd, ptr, space, 0);
+        if (n > 0) {
+            buffer_write_adv(d->rb, (size_t)n);
+            // volvemos al inicio del while: primero parseamos lo nuevo
+            continue;
+        }
+
+        if (n == 0) {
+            printf("[REQUEST_READ] cliente cerró la conexión (fd=%d)\n", key->fd);
+            return S5_ERROR;
+        }
+
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // No hay más datos *del socket*, y tampoco en el buffer,
+                // así que esperamos otro read_ready.
+                return S5_REQUEST_READ;
+            }
+            perror("[REQUEST_READ] recv");
+            return S5_ERROR;
+        }
+    }
+}
+
+
+// ============================================================================
+// REQUEST_WRITE
+// ============================================================================
+
+static void request_write_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    printf("[REQUEST_WRITE] arrival (fd=%d)\n", key->fd);
+    
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    // Armar respuesta SOCKS5 de éxito por ahora
+    uint8_t addr[4] = {0x00, 0x00, 0x00, 0x00};
+    if (request_marshall_reply(d->wb, 0x00, 0x01, addr, 0) < 0) {
+        return; // error: dejamos que la FSM lo trate como error más tarde
+    }
+
+    selector_set_interest_key(key, OP_WRITE);
+}
+
+static void request_write_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    printf("[REQUEST_WRITE] departure (fd=%d)\n", key->fd);
+}
+
+static unsigned request_write_on_write_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    size_t n;
+    uint8_t *ptr = buffer_read_ptr(d->wb, &n);
+
+    if (n == 0) {
+        buffer_reset(d->wb);
+        return S5_DONE;
+    }
+
+    ssize_t sent = send(key->fd, ptr, n, 0);
+    if (sent <= 0) {
+        return S5_ERROR;
+    }
+
+    buffer_read_adv(d->wb, sent);
+
+    if (!buffer_can_read(d->wb)) {
+        buffer_reset(d->wb);
+        return S5_DONE;
+    }
+
+    return S5_REQUEST_WRITE;
 }
 
 // ============================================================================
