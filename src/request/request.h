@@ -11,6 +11,7 @@ enum request_state {
     REQUEST_CMD,
     REQUEST_RSV,
     REQUEST_ATYP,
+    REQUEST_ADDRLEN,
     REQUEST_DSTADDR,
     REQUEST_DSTPORT,
     REQUEST_DONE,
@@ -26,6 +27,7 @@ struct request_parser {
 
     uint8_t addr[256];   // Para IPv4, IPv6 o FQDN
     uint16_t port;
+    uint8_t port_len;      // cantidad de bytes leídos del puerto
 
     uint8_t addr_len;    // cantidad de bytes leídos para el address
     uint8_t expected_len; // tamaño esperado del address

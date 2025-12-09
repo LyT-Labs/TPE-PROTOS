@@ -41,6 +41,7 @@ void request_parser_init(struct request_parser *p) {
     p->addr_len = 0;
     p->expected_len = 0;
     p->has_addr_len = false;
+    p->port_len = 0;
     p->port = 0;
 }
 
@@ -90,10 +91,55 @@ enum request_state request_consume(buffer *b, struct request_parser *p, bool *er
                 break;
 
             case REQUEST_ATYP:
-                return p->state;
+                p->atyp = c;
+                if (c == 0x01) {
+                    p->expected_len = 4;
+                    p->addr_len = 0;
+                    p->state = REQUEST_DSTADDR;
+                } else if (c == 0x04) {
+                    p->expected_len = 16;
+                    p->addr_len = 0;
+                    p->state = REQUEST_DSTADDR;
+                } else if (c == 0x03) {
+                    p->addr_len = 0;
+                    p->has_addr_len = false;
+                    p->state = REQUEST_ADDRLEN;
+                } else {
+                    p->state = REQUEST_ERROR;
+                    if (errored != NULL) {
+                        *errored = true;
+                    }
+                    return p->state;
+                }
+                break;
+
+            case REQUEST_ADDRLEN:
+                p->expected_len = c;
+                p->addr_len = 0;
+                p->has_addr_len = true;
+                p->state = REQUEST_DSTADDR;
+                break;
 
             case REQUEST_DSTADDR:
+                p->addr[p->addr_len++] = c;
+                if (p->addr_len == p->expected_len) {
+                    p->port = 0;
+                    p->port_len = 0;
+                    p->state = REQUEST_DSTPORT;
+                    return p->state;
+                }
+                break;
+
             case REQUEST_DSTPORT:
+                p->port = (uint16_t)((p->port << 8) | c);
+                p->port_len++;
+
+                if (p->port_len == 2) {
+                    p->state = REQUEST_DONE;
+                    return p->state;
+                }
+                break;
+
             case REQUEST_DONE:
             case REQUEST_ERROR:
                 return p->state;
