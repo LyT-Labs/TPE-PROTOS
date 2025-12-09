@@ -1,7 +1,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include "hello.h"
+#include "../socks5/socks5.h"
 
 // ============================================================================
 // Acciones para las transiciones del parser
@@ -229,4 +233,150 @@ void hello_close(struct hello_parser *p) {
         parser_destroy(p->parser);
         p->parser = NULL;
     }
+}
+
+// ============================================================================
+// ESTADOS HELLO - Funciones de la máquina de estados
+// ============================================================================
+
+static void on_hello_method(struct hello_parser *p, const uint8_t method) {
+    uint8_t *selected = p->data;
+    if (SOCKS_HELLO_NOAUTHENTICATION_REQUIRED == method) {
+        *selected = method;
+    }
+}
+
+static unsigned client_hello_process(struct hello_st *d) {
+    uint8_t final_method = d->method;
+    
+    if (d->method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
+        final_method = 0xFF;
+    }
+
+    size_t space;
+    uint8_t *ptr = buffer_write_ptr(d->wb, &space);
+    
+    if (space < 2) {
+        return C_ERROR;
+    }
+
+    ptr[0] = SOCKS_VERSION;  // 0x05
+    ptr[1] = final_method;
+    buffer_write_adv(d->wb, 2);
+
+    if (d->method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
+        return C_ERROR;
+    }
+
+    return C_HELLO_WRITE;
+}
+
+void client_hello_read_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct hello_st *d = &conn->client.hello;
+
+    d->rb = &conn->read_buf;
+    d->wb = &conn->write_buf;
+    d->method = SOCKS_HELLO_NO_ACCEPTABLE_METHODS;
+
+    hello_parser_init(&d->parser);
+    d->parser.data = &d->method;
+    d->parser.on_authentication_method = on_hello_method;
+
+    selector_set_interest_key(key, OP_READ);
+}
+
+void client_hello_read_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct hello_st *d = &conn->client.hello;
+    hello_close(&d->parser);
+}
+
+unsigned client_hello_read_on_read_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    struct hello_st *d = &conn->client.hello;
+    unsigned ret = C_HELLO_READ;
+    bool error = false;
+
+    size_t space;
+    uint8_t *ptr = buffer_write_ptr(d->rb, &space);
+    if (space == 0) {
+        return C_ERROR;
+    }
+
+    const ssize_t n = recv(key->fd, ptr, space, 0);
+    if (n == 0) {
+        return C_ERROR;
+    } else if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return C_HELLO_READ;
+        }
+        return C_ERROR;
+    }
+
+    buffer_write_adv(d->rb, (size_t)n);
+
+    const enum hello_state st = hello_consume(d->rb, &d->parser, &error);
+    if (hello_is_done(st, &error)) {
+        if (error) {
+            return C_ERROR;
+        }
+        
+        ret = client_hello_process(d);
+        if (ret == C_ERROR) {
+            return C_ERROR;
+        }
+        
+        if (selector_set_interest_key(key, OP_WRITE) != SELECTOR_SUCCESS) {
+            return C_ERROR;
+        }
+        
+        return C_HELLO_WRITE;
+    }
+
+    return error ? C_ERROR : ret;
+}
+
+void client_hello_write_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    selector_set_interest_key(key, OP_WRITE);
+}
+
+void client_hello_write_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    buffer_reset(&conn->write_buf);
+}
+
+unsigned client_hello_write_on_write_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    struct hello_st *d = &conn->client.hello;
+
+    if (!buffer_can_read(d->wb)) {
+        return C_ERROR;
+    }
+
+    size_t nbytes;
+    uint8_t *ptr = buffer_read_ptr(d->wb, &nbytes);
+
+    const ssize_t n = send(key->fd, ptr, nbytes, 0);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return C_HELLO_WRITE;
+        }
+        return C_ERROR;
+    }
+
+    buffer_read_adv(d->wb, (size_t)n);
+    if (buffer_can_read(d->wb)) {
+        return C_HELLO_WRITE;
+    }
+
+    if (d->method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
+        return C_ERROR;
+    }
+
+    return C_REQUEST_READ;
 }

@@ -1,13 +1,15 @@
+#define _POSIX_C_SOURCE 200809L
 #include "request.h"
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
-
-// ============================================================================  
-// Acciones de parser (por ahora vacías, solo declarar funciones estáticas)
-// ============================================================================
-
-// TODO: implementar más adelante
+#include <errno.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "../socks5/socks5.h"
+#include "../tunnel/tunnel.h"
 
 // ============================================================================  
 // Tabla de transiciones del parser (por ahora vacía)
@@ -180,7 +182,7 @@ int request_marshall_reply(buffer *b, uint8_t rep, uint8_t atyp, const uint8_t *
     size_t space;
     uint8_t *ptr = buffer_write_ptr(b, &space);
 
-    // Necesitamos al menos 10 bytes: VER(1) REP(1) RSV(1) ATYP(1) ADDR(4) PORT(2)
+    // Al menos 10 bytes VER(1) REP(1) RSV(1) ATYP(1) ADDR(4) PORT(2)
     if (space < 10) {
         return -1;
     }
@@ -196,7 +198,6 @@ int request_marshall_reply(buffer *b, uint8_t rep, uint8_t atyp, const uint8_t *
     ptr[6] = addr[2];
     ptr[7] = addr[3];
 
-    // PORT (big endian)
     ptr[8] = (uint8_t)((port >> 8) & 0xFF);
     ptr[9] = (uint8_t)(port & 0xFF);
 
@@ -209,4 +210,229 @@ void request_close(struct request_parser *p) {
         parser_destroy(p->parser);
         p->parser = NULL;
     }
+}
+
+// ============================================================================
+// ESTADOS REQUEST - Funciones de la máquina de estados
+// ============================================================================
+
+static int set_non_blocking(int fd) {
+    const int flags = fcntl(fd, F_GETFL);
+    if (flags == -1) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void client_request_read_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    d->rb = &conn->read_buf;
+    d->wb = &conn->write_buf;
+    request_parser_init(&d->parser);
+
+    selector_set_interest_key(key, OP_READ);
+}
+
+void client_request_read_on_departure(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    conn->req_cmd      = d->parser.cmd;
+    conn->req_atyp     = d->parser.atyp;
+    conn->req_port     = d->parser.port;
+    conn->req_addr_len = d->parser.addr_len;
+    if (conn->req_addr_len > sizeof(conn->req_addr)) {
+        conn->req_addr_len = sizeof(conn->req_addr);
+    }
+    if (conn->req_addr_len > 0) {
+        memcpy(conn->req_addr, d->parser.addr, conn->req_addr_len);
+    }
+
+    request_close(&d->parser);
+}
+
+unsigned client_request_read_on_read_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
+
+    while (true) {
+        bool error = false;
+        enum request_state st = request_consume(d->rb, &d->parser, &error);
+
+        if (request_is_done(st, &error)) {
+            if (error) {
+                return C_ERROR;
+            }
+            if (selector_set_interest_key(key, OP_WRITE) != SELECTOR_SUCCESS) {
+                return C_ERROR;
+            }
+            return C_REQUEST_WRITE;
+        }
+
+        if (buffer_can_read(d->rb)) {
+            continue;
+        }
+
+        size_t space;
+        uint8_t *ptr = buffer_write_ptr(d->rb, &space);
+        if (space == 0) {
+            return C_ERROR;
+        }
+
+        const ssize_t n = recv(key->fd, ptr, space, 0);
+        if (n > 0) {
+            buffer_write_adv(d->rb, (size_t)n);
+            continue;
+        }
+
+        if (n == 0) {
+            return C_ERROR;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return C_REQUEST_READ;
+        }
+        return C_ERROR;
+    }
+}
+
+void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
+    (void)state;
+    struct socks5_conn *conn = key->data;
+
+    buffer_reset(&conn->write_buf);
+    conn->reply_ready = false;
+    conn->reply_sent = false;
+
+    if (conn->req_cmd != 0x01) {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x07, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        return;
+    }
+
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%u", conn->req_port);
+
+    int gai = 0;
+    if (conn->req_atyp == 0x03) {
+        char host[256];
+        memcpy(host, conn->req_addr, conn->req_addr_len);
+        host[conn->req_addr_len] = '\0';
+        gai = getaddrinfo(host, portstr, &hints, &result);
+    } else if (conn->req_atyp == 0x01) {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, conn->req_addr, ip, sizeof(ip));
+        gai = getaddrinfo(ip, portstr, &hints, &result);
+    } else if (conn->req_atyp == 0x04) {
+        char ip[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, conn->req_addr, ip, sizeof(ip));
+        gai = getaddrinfo(ip, portstr, &hints, &result);
+    } else {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x08, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        return;
+    }
+
+    if (gai != 0 || result == NULL) {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x04, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        if (result != NULL) {
+            freeaddrinfo(result);
+        }
+        return;
+    }
+
+    memcpy(&conn->origin_addr, result->ai_addr, result->ai_addrlen);
+    conn->origin_addr_len = result->ai_addrlen;
+    freeaddrinfo(result);
+
+    const int fd = socket(conn->origin_addr.ss_family, SOCK_STREAM, 0);
+    if (fd < 0) {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x01, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        return;
+    }
+
+    if (set_non_blocking(fd) == -1) {
+        close(fd);
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x01, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        return;
+    }
+
+    conn->origin_fd = fd;
+    const int r = connect(fd, (struct sockaddr *)&conn->origin_addr, conn->origin_addr_len);
+    if (r == 0) {
+        if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
+            close(fd);
+            conn->origin_fd = -1;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            client_set_reply(conn, 0x01, 0x01, addr, 0);
+            selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+            return;
+        }
+        conn->reply_code = 0x00;
+        prepare_bound_addr(conn);
+        conn->reply_ready = true;
+        conn->origin_stm.current = conn->origin_stm.states + O_CONNECTING;
+        if (conn->origin_stm.current->on_arrival != NULL) {
+            struct selector_key origin_key = {
+                .s = key->s,
+                .fd = fd,
+                .data = conn,
+            };
+            conn->origin_stm.current->on_arrival(O_CONNECTING, &origin_key);
+        }
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        selector_set_interest(key->s, fd, OP_NOOP);
+        return;
+    }
+
+    if (r < 0 && errno == EINPROGRESS) {
+        if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
+            close(fd);
+            conn->origin_fd = -1;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            client_set_reply(conn, 0x01, 0x01, addr, 0);
+            selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+            return;
+        }
+        selector_set_interest(key->s, conn->client_fd, OP_NOOP);
+        return;
+    }
+
+    close(fd);
+    conn->origin_fd = -1;
+    uint8_t addr[4] = {0, 0, 0, 0};
+    client_set_reply(conn, 0x01, 0x01, addr, 0);
+    selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+}
+
+unsigned client_request_write_on_read_ready(struct selector_key *key) {
+    (void)key;
+    return C_REQUEST_WRITE;
+}
+
+unsigned client_request_write_on_write_ready(struct selector_key *key) {
+    struct socks5_conn *conn = key->data;
+    if (conn->reply_ready) {
+        return C_REPLY;
+    }
+    selector_set_interest_key(key, OP_NOOP);
+    return C_REQUEST_WRITE;
 }

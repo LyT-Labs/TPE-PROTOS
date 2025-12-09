@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "../helpers/buffer.h"
 #include "../helpers/parser.h"
+#include "../helpers/selector.h"
 
 // ===========================================================================
 // Constantes del protocolo SOCKS5 para el saludo
@@ -51,5 +52,27 @@ bool hello_is_done(const enum hello_state state, bool *error);
 int hello_marshall(buffer *b, const uint8_t method);
 
 void hello_close(struct hello_parser *p);
+
+// ===========================================================================
+// Estructuras de estado HELLO
+// ===========================================================================
+
+struct hello_st {
+    buffer *rb, *wb;
+    struct hello_parser parser;
+    uint8_t method;
+};
+
+// ===========================================================================
+// Funciones de manejo de estados HELLO
+// ===========================================================================
+
+void client_hello_read_on_arrival(unsigned state, struct selector_key *key);
+void client_hello_read_on_departure(unsigned state, struct selector_key *key);
+unsigned client_hello_read_on_read_ready(struct selector_key *key);
+
+void client_hello_write_on_arrival(unsigned state, struct selector_key *key);
+void client_hello_write_on_departure(unsigned state, struct selector_key *key);
+unsigned client_hello_write_on_write_ready(struct selector_key *key);
 
 #endif

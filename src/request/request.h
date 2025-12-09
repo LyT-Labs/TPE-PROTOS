@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "../helpers/buffer.h"
 #include "../helpers/parser.h"
+#include "../helpers/selector.h"
 
 enum request_state {
     REQUEST_VERSION = 0,
@@ -40,5 +41,27 @@ enum request_state request_consume(buffer *b, struct request_parser *p, bool *er
 bool request_is_done(enum request_state st, bool *errored);
 int request_marshall_reply(buffer *b, uint8_t rep, uint8_t atyp, const uint8_t *addr, uint16_t port);
 void request_close(struct request_parser *p);
+
+// ===========================================================================
+// Estructuras de estado REQUEST
+// ===========================================================================
+
+struct request_st {
+    buffer *rb;
+    buffer *wb;
+    struct request_parser parser;
+};
+
+// ===========================================================================
+// Funciones de manejo de estados REQUEST
+// ===========================================================================
+
+void client_request_read_on_arrival(unsigned state, struct selector_key *key);
+void client_request_read_on_departure(unsigned state, struct selector_key *key);
+unsigned client_request_read_on_read_ready(struct selector_key *key);
+
+void client_request_write_on_arrival(unsigned state, struct selector_key *key);
+unsigned client_request_write_on_read_ready(struct selector_key *key);
+unsigned client_request_write_on_write_ready(struct selector_key *key);
 
 #endif
