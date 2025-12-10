@@ -15,12 +15,18 @@ struct socks5_conn;
 // Estructuras de canal de datos
 // ===========================================================================
 
+enum channel_direction {
+    C2O,
+    O2C
+};
+
 struct data_channel {
     int *src_fd;
     int *dst_fd;
     buffer *dst_buffer;
     bool read_enabled;
     bool write_enabled;
+    enum channel_direction direction;
 };
 
 enum tunnel_status {

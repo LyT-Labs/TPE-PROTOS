@@ -3,6 +3,7 @@
 #include "../request/request.h"
 #include "../connect/connect.h"
 #include "../tunnel/tunnel.h"
+#include "../helpers/metrics.h"
 #include <string.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -148,12 +149,14 @@ struct socks5_conn *socks5_new(int client_fd) {
     conn->chan_c2o.dst_buffer = &conn->client_to_origin_buf;
     conn->chan_c2o.read_enabled = true;
     conn->chan_c2o.write_enabled = false;
+    conn->chan_c2o.direction = C2O;
 
     conn->chan_o2c.src_fd = &conn->origin_fd;
     conn->chan_o2c.dst_fd = &conn->client_fd;
     conn->chan_o2c.dst_buffer = &conn->origin_to_client_buf;
     conn->chan_o2c.read_enabled = true;
     conn->chan_o2c.write_enabled = false;
+    conn->chan_o2c.direction = O2C;
 
     conn->client_stm.initial   = C_HELLO_READ;
     conn->client_stm.max_state = (sizeof(client_states) / sizeof(client_states[0])) - 1;
@@ -164,6 +167,14 @@ struct socks5_conn *socks5_new(int client_fd) {
     conn->origin_stm.max_state = (sizeof(origin_states) / sizeof(origin_states[0])) - 1;
     conn->origin_stm.states    = origin_states;
     stm_init(&conn->origin_stm);
+
+    struct socks5_metrics *m = metrics_get();
+    m->total_connections++;
+    m->current_connections++;
+    
+    if (m->current_connections > m->max_concurrent_connections) {
+        m->max_concurrent_connections = m->current_connections;
+    }
 
     return conn;
 }
@@ -265,6 +276,11 @@ static void socks5_close(struct selector_key *key) {
     }
 
     conn->closed = true;
+
+    struct socks5_metrics *m = metrics_get();
+    if (m->current_connections > 0) {
+        m->current_connections--;
+    }
 
     const int cfd = conn->client_fd;
     const int ofd = conn->origin_fd;

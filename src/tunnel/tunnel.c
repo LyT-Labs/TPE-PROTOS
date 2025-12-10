@@ -2,6 +2,7 @@
 #include "../socks5/socks5.h"
 #include "../request/request.h"
 #include "../helpers/stm.h"
+#include "../helpers/metrics.h"
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -14,6 +15,10 @@
 
 void client_set_reply(struct socks5_conn *conn, uint8_t rep, uint8_t atyp, const uint8_t *addr, uint16_t port) {
     conn->reply_code = rep;
+    
+    struct socks5_metrics *m = metrics_get();
+    m->rep_code_count[rep]++;
+    
     conn->reply_atyp = atyp;
     memset(conn->reply_addr, 0, sizeof(conn->reply_addr));
     if (addr != NULL) {
@@ -86,6 +91,14 @@ enum tunnel_status channel_read(struct selector_key *key, struct data_channel *c
 
     buffer_write_adv(ch->dst_buffer, (size_t)n);
     ch->write_enabled = true;
+
+    struct socks5_metrics *m = metrics_get();
+    if (ch->direction == C2O) {
+        m->bytes_client_to_origin += (uint64_t)n;
+    } else if (ch->direction == O2C) {
+        m->bytes_origin_to_client += (uint64_t)n;
+    }
+
     return TUNNEL_STAY;
 }
 
