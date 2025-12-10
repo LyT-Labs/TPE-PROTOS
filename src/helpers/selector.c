@@ -1,7 +1,6 @@
 /**
  * selector.c - un muliplexor de entrada salida
  */
-#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>  // perror
 #include <stdlib.h> // malloc
 #include <string.h> // memset
