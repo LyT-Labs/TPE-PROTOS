@@ -203,12 +203,11 @@ void socks5_destroy(struct socks5_conn *conn) {
         return;
     }
 
-    if (conn->client_fd != -1) {
-        close(conn->client_fd);
+    struct socks5_metrics *m = metrics_get();
+    if (m->current_connections > 0) {
+        m->current_connections--;
     }
-    if (conn->origin_fd != -1) {
-        close(conn->origin_fd);
-    }
+
     free(conn);
 }
 

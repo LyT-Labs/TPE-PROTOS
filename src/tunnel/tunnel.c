@@ -136,6 +136,10 @@ enum tunnel_status channel_read(struct selector_key *key, struct data_channel *c
         }
         shutdown(*ch->src_fd, SHUT_RD);
         
+        if (!buffer_can_read(ch->dst_buffer) && *ch->dst_fd != -1) {
+            shutdown(*ch->dst_fd, SHUT_WR);
+        }
+        
         return TUNNEL_STAY;
     }
 
