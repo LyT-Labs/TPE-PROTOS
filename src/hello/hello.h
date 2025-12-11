@@ -12,6 +12,7 @@
 // ===========================================================================
 #define SOCKS_VERSION                           0x05
 #define SOCKS_HELLO_NOAUTHENTICATION_REQUIRED   0x00
+#define SOCKS_HELLO_USERNAME_PASSWORD           0x02
 #define SOCKS_HELLO_NO_ACCEPTABLE_METHODS       0xFF
 
 // ===========================================================================
@@ -61,6 +62,8 @@ struct hello_st {
     buffer *rb, *wb;
     struct hello_parser parser;
     uint8_t method;
+    bool supports_auth;
+    bool supports_noauth;
 };
 
 // ===========================================================================

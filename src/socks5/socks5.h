@@ -13,6 +13,7 @@
 #include "../helpers/stm.h"
 #include "../helpers/selector.h"
 #include "../hello/hello.h"
+#include "../auth/auth.h"
 #include "../request/request.h"
 #include "../tunnel/tunnel.h"
 
@@ -22,6 +23,8 @@
 enum client_state {
     C_HELLO_READ = 0,
     C_HELLO_WRITE,
+    C_AUTH_READ,
+    C_AUTH_WRITE,
     C_REQUEST_READ,
     C_REQUEST_WRITE,
     C_REPLY,
@@ -85,8 +88,12 @@ struct socks5_conn {
     bool client_read_closed;
     bool origin_read_closed;
 
+    char username[256];
+    uint8_t method_chosen;
+
     union {
         struct hello_st hello;
+        struct auth_st auth;
         struct request_st request;
     } client;
 

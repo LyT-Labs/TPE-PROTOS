@@ -240,18 +240,28 @@ void hello_close(struct hello_parser *p) {
 // ============================================================================
 
 static void on_hello_method(struct hello_parser *p, const uint8_t method) {
-    uint8_t *selected = p->data;
-    if (SOCKS_HELLO_NOAUTHENTICATION_REQUIRED == method) {
-        *selected = method;
+    struct hello_st *d = p->data;
+    
+    if (method == SOCKS_HELLO_USERNAME_PASSWORD) {
+        d->supports_auth = true;
+    } else if (method == SOCKS_HELLO_NOAUTHENTICATION_REQUIRED) {
+        d->supports_noauth = true;
     }
 }
 
 static unsigned client_hello_process(struct hello_st *d) {
-    uint8_t final_method = d->method;
+    uint8_t chosen_method;
     
-    if (d->method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
-        final_method = 0xFF;
+    // Seleccionar método según prioridad: AUTH > NO-AUTH > NO ACCEPTABLE
+    if (d->supports_auth) {
+        chosen_method = SOCKS_HELLO_USERNAME_PASSWORD;
+    } else if (d->supports_noauth) {
+        chosen_method = SOCKS_HELLO_NOAUTHENTICATION_REQUIRED;
+    } else {
+        chosen_method = SOCKS_HELLO_NO_ACCEPTABLE_METHODS;
     }
+    
+    d->method = chosen_method;
 
     size_t space;
     uint8_t *ptr = buffer_write_ptr(d->wb, &space);
@@ -260,11 +270,11 @@ static unsigned client_hello_process(struct hello_st *d) {
         return C_ERROR;
     }
 
-    ptr[0] = SOCKS_VERSION;  // 0x05
-    ptr[1] = final_method;
+    ptr[0] = SOCKS_VERSION;
+    ptr[1] = chosen_method;
     buffer_write_adv(d->wb, 2);
 
-    if (d->method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
+    if (chosen_method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
         return C_ERROR;
     }
 
@@ -279,9 +289,11 @@ void client_hello_read_on_arrival(unsigned state, struct selector_key *key) {
     d->rb = &conn->read_buf;
     d->wb = &conn->write_buf;
     d->method = SOCKS_HELLO_NO_ACCEPTABLE_METHODS;
+    d->supports_auth = false;
+    d->supports_noauth = false;
 
     hello_parser_init(&d->parser);
-    d->parser.data = &d->method;
+    d->parser.data = d;
     d->parser.on_authentication_method = on_hello_method;
 
     selector_set_interest_key(key, OP_READ);
@@ -374,9 +386,13 @@ unsigned client_hello_write_on_write_ready(struct selector_key *key) {
         return C_HELLO_WRITE;
     }
 
-    if (d->method == SOCKS_HELLO_NO_ACCEPTABLE_METHODS) {
+    conn->method_chosen = d->method;
+
+    if (d->method == SOCKS_HELLO_USERNAME_PASSWORD) {
+        return C_AUTH_READ;
+    } else if (d->method == SOCKS_HELLO_NOAUTHENTICATION_REQUIRED) {
+        return C_REQUEST_READ;
+    } else {
         return C_ERROR;
     }
-
-    return C_REQUEST_READ;
 }

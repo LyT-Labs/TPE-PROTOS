@@ -3,11 +3,13 @@
 #include "../request/request.h"
 #include "../helpers/stm.h"
 #include "../helpers/metrics.h"
+#include "../helpers/access_log.h"
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <stdio.h>
 
 // ============================================================================
 // FUNCIONES AUXILIARES DE REPLY
@@ -35,6 +37,45 @@ void client_set_reply(struct socks5_conn *conn, uint8_t rep, uint8_t atyp, const
     }
     conn->reply_port = port;
     conn->reply_ready = true;
+
+    if (!conn->reply_sent) {
+        char src_ip[128] = "unknown";
+        struct sockaddr_storage client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        if (getpeername(conn->client_fd, (struct sockaddr *)&client_addr, &addr_len) == 0) {
+            if (client_addr.ss_family == AF_INET) {
+                inet_ntop(AF_INET, &((struct sockaddr_in *)&client_addr)->sin_addr, src_ip, sizeof(src_ip));
+            } else if (client_addr.ss_family == AF_INET6) {
+                inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&client_addr)->sin6_addr, src_ip, sizeof(src_ip));
+            }
+        }
+
+        char dst[512];
+        if (conn->req_atyp == 0x01) {
+            // IPv4
+            snprintf(dst, sizeof(dst), "%u.%u.%u.%u",
+                     conn->req_addr[0], conn->req_addr[1],
+                     conn->req_addr[2], conn->req_addr[3]);
+        } else if (conn->req_atyp == 0x03) {
+            // DOMAINNAME - el primer byte es la longitud
+            uint8_t len = conn->req_addr[0];
+            memcpy(dst, &conn->req_addr[1], len);
+            dst[len] = '\0';
+        } else if (conn->req_atyp == 0x04) {
+            // IPv6
+            inet_ntop(AF_INET6, conn->req_addr, dst, sizeof(dst));
+        } else {
+            snprintf(dst, sizeof(dst), "unknown");
+        }
+
+        access_log_record(
+            conn->username,
+            src_ip,
+            dst,
+            conn->req_port,
+            (rep == 0x00)
+        );
+    }
 }
 
 void prepare_bound_addr(struct socks5_conn *conn) {
@@ -76,6 +117,7 @@ void client_build_reply(struct socks5_conn *conn) {
 // ============================================================================
 
 enum tunnel_status channel_read(struct selector_key *key, struct data_channel *ch, bool *read_closed_flag) {
+    (void)key;
     if (!ch->read_enabled || *ch->src_fd == -1 || ch->dst_buffer == NULL) {
         return TUNNEL_STAY;
     }
@@ -118,6 +160,7 @@ enum tunnel_status channel_read(struct selector_key *key, struct data_channel *c
 }
 
 enum tunnel_status channel_write(struct selector_key *key, struct data_channel *ch) {
+    (void)key;
     if (*ch->dst_fd == -1 || ch->dst_buffer == NULL) {
         return TUNNEL_STAY;
     }

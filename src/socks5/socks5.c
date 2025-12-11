@@ -35,6 +35,22 @@ static const struct state_definition client_states[] = {
         .on_write_ready = client_hello_write_on_write_ready,
         .on_block_ready = NULL,
     },
+    [C_AUTH_READ] = {
+        .state          = C_AUTH_READ,
+        .on_arrival     = client_auth_read_on_arrival,
+        .on_departure   = NULL,
+        .on_read_ready  = client_auth_read_on_read_ready,
+        .on_write_ready = NULL,
+        .on_block_ready = NULL,
+    },
+    [C_AUTH_WRITE] = {
+        .state          = C_AUTH_WRITE,
+        .on_arrival     = client_auth_write_on_arrival,
+        .on_departure   = NULL,
+        .on_read_ready  = NULL,
+        .on_write_ready = client_auth_write_on_write_ready,
+        .on_block_ready = NULL,
+    },
     [C_REQUEST_READ] = {
         .state          = C_REQUEST_READ,
         .on_arrival     = client_request_read_on_arrival,
@@ -157,6 +173,9 @@ struct socks5_conn *socks5_new(int client_fd) {
     conn->chan_o2c.read_enabled = true;
     conn->chan_o2c.write_enabled = false;
     conn->chan_o2c.direction = O2C;
+
+    strcpy(conn->username, "anonymous");
+    conn->method_chosen = 0xFF;
 
     conn->client_stm.initial   = C_HELLO_READ;
     conn->client_stm.max_state = (sizeof(client_states) / sizeof(client_states[0])) - 1;
