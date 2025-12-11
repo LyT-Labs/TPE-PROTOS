@@ -7,9 +7,9 @@ from collections import Counter
 # Configuración
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = "1080"
-TARGET_URL = "http://google.com"
-CONCURRENCY = 1000
-REQUESTS_PER_WORKER = 10
+TARGET_URL = "http://127.0.0.1:9090/"
+CONCURRENCY = 500
+REQUESTS_PER_WORKER = 1
 CONNECT_TIMEOUT = 5
 MAX_TIME = 10
 
