@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "../helpers/buffer.h"
+#include "../args/args.h"
 
 #define AUTH_VERSION 0x01
 
@@ -26,6 +27,7 @@ void auth_init(struct auth_st *st);
 bool auth_consume(struct auth_st *st, buffer *b);
 void auth_validate(struct auth_st *st);
 size_t auth_build_response(const struct auth_st *st, uint8_t out[2]);
+void auth_set_users(struct users *users, int max_users);
 
 // ===========================================================================
 // Handlers de estado para AUTH

@@ -1,9 +1,20 @@
 #include "auth.h"
 #include <string.h>
+#include "../args/args.h"
 
-// TODO: Mover para no tener las credenciales hardcodeadas
-static const char* VALID_USER = "user";
-static const char* VALID_PASS = "pass";
+static struct users configured_users[MAX_USERS];
+static int num_configured_users = 0;
+
+void auth_set_users(struct users *users, int max_users) {
+    num_configured_users = 0;
+    for (int i = 0; i < max_users && i < MAX_USERS; i++) {
+        if (users[i].name != NULL && users[i].pass != NULL) {
+            configured_users[num_configured_users].name = users[i].name;
+            configured_users[num_configured_users].pass = users[i].pass;
+            num_configured_users++;
+        }
+    }
+}
 
 void auth_init(struct auth_st *st) {
     memset(st, 0, sizeof(*st));
@@ -40,6 +51,7 @@ bool auth_consume(struct auth_st *st, buffer *b) {
         st->ulen = buffer_read(b);
         if (st->ulen == 0) {
             st->finished = true;
+            st->success = false;
             return true;
         }
     }
@@ -78,11 +90,14 @@ bool auth_consume(struct auth_st *st, buffer *b) {
 // Valida las credenciales
 // ============================================================================
 void auth_validate(struct auth_st *st) {
-    if (strcmp(st->username, VALID_USER) == 0 && 
-        strcmp(st->password, VALID_PASS) == 0) {
-        st->success = true;
-    } else {
-        st->success = false;
+    st->success = false;
+    
+    for (int i = 0; i < num_configured_users; i++) {
+        if (strcmp(st->username, configured_users[i].name) == 0 && 
+            strcmp(st->password, configured_users[i].pass) == 0) {
+            st->success = true;
+            return;
+        }
     }
 }
 

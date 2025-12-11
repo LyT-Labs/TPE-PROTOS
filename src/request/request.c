@@ -10,6 +10,7 @@
 #include "../socks5/socks5.h"
 #include "../tunnel/tunnel.h"
 #include "../resolver/resolver.h"
+#include "../helpers/metrics.h"
 
 // ============================================================================  
 // Tabla de transiciones del parser (por ahora vacía)
@@ -318,15 +319,19 @@ static void on_resolution_done(
 ) {
     struct socks5_conn *conn = (struct socks5_conn *)data;
     struct request_st *d = &conn->client.request;
+    struct socks5_metrics *m = metrics_get();
     
     d->resolving = false;
     
     if (status != RESOLVER_SUCCESS || result == NULL) {
+        m->dns_fail++;
         uint8_t addr[4] = {0, 0, 0, 0};
         client_set_reply(conn, 0x04, 0x01, addr, 0);
         selector_set_interest(key->s, conn->client_fd, OP_WRITE);
         return;
     }
+    
+    m->dns_ok++;
     
     struct addrinfo *rp;
     int fd = -1;
@@ -436,6 +441,8 @@ void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
         
         if (!resolver_request(key, host, portstr, on_resolution_done, conn)) {
             d->resolving = false;
+            struct socks5_metrics *m = metrics_get();
+            m->dns_fail++;
             uint8_t addr[4] = {0, 0, 0, 0};
             client_set_reply(conn, 0x01, 0x01, addr, 0);
             selector_set_interest(key->s, conn->client_fd, OP_WRITE);

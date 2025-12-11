@@ -10,10 +10,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #include "echo_server.h"
 #include "../helpers/monitor.h"
 #include "../resolver/resolver.h"
+#include "../args/args.h"
+#include "../auth/auth.h"
 
 #define ECHO_DEFAULT_PORT 1080
 #define ECHO_BUFFER_SIZE  4096
@@ -190,16 +193,10 @@ static void echo_close(struct selector_key *key) {
 }
 
 int echo_server_main(int argc, char *argv[]) {
-    uint16_t port = ECHO_DEFAULT_PORT;
+    struct socks5args args;
+    parse_args(argc, argv, &args);
 
-    if (argc == 2) {
-        int p = atoi(argv[1]);
-        if (p > 0 && p < 65536) {
-            port = (uint16_t)p;
-        } else {
-            fprintf(stderr, "Puerto inválido '%s', usando %d\n", argv[1], port);
-        }
-    }
+    auth_set_users(args.users, MAX_USERS);
 
     const struct selector_init conf = {
         .signal = SIGALRM,
@@ -230,18 +227,32 @@ int echo_server_main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
 
-    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-        perror("bind");
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", args.socks_port);
+
+    int gai_err = getaddrinfo(args.socks_addr, port_str, &hints, &res);
+    if (gai_err != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(gai_err));
         close(server_fd);
         selector_close();
         return EXIT_FAILURE;
     }
+
+    if (bind(server_fd, res->ai_addr, res->ai_addrlen) == -1) {
+        perror("bind");
+        freeaddrinfo(res);
+        close(server_fd);
+        selector_close();
+        return EXIT_FAILURE;
+    }
+
+    freeaddrinfo(res);
 
     if (listen(server_fd, 20) == -1) {
         perror("listen");
@@ -274,7 +285,7 @@ int echo_server_main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("Echo-server no bloqueante escuchando en puerto %d\n", port);
+    printf("SOCKS5 proxy escuchando en %s:%u\n", args.socks_addr, args.socks_port);
 
     // Inicializar el subsistema de resolución DNS asíncrona
     if (!resolver_init(2)) {
@@ -289,11 +300,15 @@ int echo_server_main(int argc, char *argv[]) {
         }
     }
 
-    if (monitor_init(sel, "127.0.0.1", "9999") == -1) {
-        fprintf(stderr, "Advertencia: no se pudo inicializar el monitor en puerto 9999\n");
+    char mng_port_str[16];
+    snprintf(mng_port_str, sizeof(mng_port_str), "%u", args.mng_port);
+    
+    if (monitor_init(sel, args.mng_addr, mng_port_str) == -1) {
+        fprintf(stderr, "Advertencia: no se pudo inicializar el monitor en %s:%u\n", 
+                args.mng_addr, args.mng_port);
         fprintf(stderr, "El servidor continuará sin monitoreo.\n");
     } else {
-        printf("Monitor de métricas escuchando en 127.0.0.1:9999\n");
+        printf("Monitor de métricas escuchando en %s:%u\n", args.mng_addr, args.mng_port);
     }
 
     while (1) {
