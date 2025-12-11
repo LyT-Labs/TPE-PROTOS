@@ -1,9 +1,14 @@
 #include "auth.h"
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 #include "../args/args.h"
 
 static struct users configured_users[MAX_USERS];
 static int num_configured_users = 0;
+
+static char *dynamic_usernames[MAX_USERS] = {NULL};
+static char *dynamic_passwords[MAX_USERS] = {NULL};
 
 void auth_set_users(struct users *users, int max_users) {
     num_configured_users = 0;
@@ -14,6 +19,51 @@ void auth_set_users(struct users *users, int max_users) {
             num_configured_users++;
         }
     }
+}
+
+bool auth_add_user(const char *username, const char *password) {
+    if (username == NULL || password == NULL) {
+        return false;
+    }
+
+    bool has_content = false;
+    for (const char *p = username; *p != '\0'; p++) {
+        if (!isspace((unsigned char)*p)) {
+            has_content = true;
+            break;
+        }
+    }
+    if (!has_content) {
+        return false;
+    }
+
+    for (int i = 0; i < num_configured_users; i++) {
+        if (strcmp(configured_users[i].name, username) == 0) {
+            return false;
+        }
+    }
+
+    if (num_configured_users >= MAX_USERS) {
+        return false;
+    }
+
+    char *username_copy = strdup(username);
+    char *password_copy = strdup(password);
+    
+    if (username_copy == NULL || password_copy == NULL) {
+        free(username_copy);
+        free(password_copy);
+        return false;
+    }
+
+    dynamic_usernames[num_configured_users] = username_copy;
+    dynamic_passwords[num_configured_users] = password_copy;
+
+    configured_users[num_configured_users].name = username_copy;
+    configured_users[num_configured_users].pass = password_copy;
+    num_configured_users++;
+
+    return true;
 }
 
 void auth_init(struct auth_st *st) {

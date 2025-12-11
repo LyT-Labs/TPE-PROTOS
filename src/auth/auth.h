@@ -28,6 +28,7 @@ bool auth_consume(struct auth_st *st, buffer *b);
 void auth_validate(struct auth_st *st);
 size_t auth_build_response(const struct auth_st *st, uint8_t out[2]);
 void auth_set_users(struct users *users, int max_users);
+bool auth_add_user(const char *username, const char *password);
 
 // ===========================================================================
 // Handlers de estado para AUTH

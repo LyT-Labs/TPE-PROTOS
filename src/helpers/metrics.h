@@ -22,4 +22,6 @@ struct socks5_metrics {
 
 struct socks5_metrics * metrics_get(void);
 
+void metrics_reset(void);
+
 #endif

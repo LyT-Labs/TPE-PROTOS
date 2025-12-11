@@ -1,9 +1,12 @@
 #include "monitor.h"
 #include "metrics.h"
 #include "selector.h"
+#include "../auth/auth.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <ctype.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -16,9 +19,11 @@ struct monitor_client {
     char buffer[8192];
     size_t len;
     size_t sent;
+    bool received_command;
 };
 
 static void monitor_accept(struct selector_key *key);
+static void monitor_client_read(struct selector_key *key);
 static void monitor_client_write(struct selector_key *key);
 static void monitor_client_close(struct selector_key *key);
 
@@ -30,7 +35,7 @@ static const struct fd_handler monitor_handler = {
 };
 
 static const struct fd_handler monitor_client_handler = {
-    .handle_read  = NULL,
+    .handle_read  = monitor_client_read,
     .handle_write = monitor_client_write,
     .handle_block = NULL,
     .handle_close = monitor_client_close,
@@ -192,8 +197,9 @@ static void monitor_accept(struct selector_key *key) {
 
     mc->len = offset;
     mc->sent = 0;
+    mc->received_command = false;
 
-    selector_status st = selector_register(key->s, client_fd, &monitor_client_handler, OP_WRITE, mc);
+    selector_status st = selector_register(key->s, client_fd, &monitor_client_handler, OP_READ | OP_WRITE, mc);
     if (st != SELECTOR_SUCCESS) {
         fprintf(stderr, "monitor: selector_register client falló: %s\n", selector_error(st));
         close(client_fd);
@@ -202,12 +208,107 @@ static void monitor_accept(struct selector_key *key) {
     }
 }
 
-static void monitor_client_write(struct selector_key *key) {
+static void monitor_client_read(struct selector_key *key) {
     struct monitor_client *mc = key->data;
     if (mc == NULL) {
         return;
     }
 
+    mc->received_command = true;
+
+    char cmd_buffer[1024];
+    ssize_t n = recv(key->fd, cmd_buffer, sizeof(cmd_buffer) - 1, 0);
+
+    if (n > 0) {
+        cmd_buffer[n] = '\0';
+
+        char *end = cmd_buffer + n - 1;
+        while (end >= cmd_buffer && (*end == '\r' || *end == '\n')) {
+            *end = '\0';
+            end--;
+        }
+
+        mc->len = 0;
+        mc->sent = 0;
+
+        char *tokens[3] = {NULL, NULL, NULL};
+        int token_count = 0;
+        char *saveptr = NULL;
+        char *token = strtok_r(cmd_buffer, " ", &saveptr);
+        
+        while (token != NULL && token_count < 3) {
+            tokens[token_count++] = token;
+            token = strtok_r(NULL, " ", &saveptr);
+        }
+
+        if (token_count == 1 && strcmp(tokens[0], "RESET") == 0) {
+            metrics_reset();
+
+            const char *response = "OK: metrics reset\n";
+            size_t resp_len = strlen(response);
+            
+            if (resp_len < sizeof(mc->buffer)) {
+                memcpy(mc->buffer, response, resp_len);
+                mc->len = resp_len;
+            }
+        } else if (token_count == 3 && strcmp(tokens[0], "ADDUSER") == 0) {
+            const char *username = tokens[1];
+            const char *password = tokens[2];
+
+            bool result = auth_add_user(username, password);
+            
+            const char *response;
+            if (result) {
+                response = "OK: user added\n";
+            } else {
+                bool has_content = false;
+                for (const char *p = username; *p != '\0'; p++) {
+                    if (!isspace((unsigned char)*p)) {
+                        has_content = true;
+                        break;
+                    }
+                }
+                
+                if (!has_content) {
+                    response = "ERROR: invalid username\n";
+                } else {
+                    response = "ERROR: user exists or table full\n";
+                }
+            }
+            
+            size_t resp_len = strlen(response);
+            if (resp_len < sizeof(mc->buffer)) {
+                memcpy(mc->buffer, response, resp_len);
+                mc->len = resp_len;
+            }
+        } else {
+            const char *response = "ERROR: unknown command\n";
+            size_t resp_len = strlen(response);
+            
+            if (resp_len < sizeof(mc->buffer)) {
+                memcpy(mc->buffer, response, resp_len);
+                mc->len = resp_len;
+            }
+        }
+
+        selector_set_interest(key->s, key->fd, OP_WRITE);
+
+    } else if (n == 0) {
+        selector_unregister_fd(key->s, key->fd);
+        close(key->fd);
+    } else {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            selector_unregister_fd(key->s, key->fd);
+            close(key->fd);
+        }
+    }
+}
+
+static void monitor_client_write(struct selector_key *key) {
+    struct monitor_client *mc = key->data;
+    if (mc == NULL) {
+        return;
+    }
     ssize_t n = send(key->fd, mc->buffer + mc->sent, mc->len - mc->sent, 0);
 
     if (n > 0) {
