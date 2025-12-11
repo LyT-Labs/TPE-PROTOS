@@ -5,7 +5,7 @@
 # Compilador y flags
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L -g
-LDFLAGS = 
+LDFLAGS = -pthread 
 
 # Directorios
 SRC_DIR = src
@@ -16,7 +16,7 @@ BIN_DIR = bin
 ECHO_SERVER = $(BIN_DIR)/echo_server
 
 # Detección automática de archivos fuente
-SOURCES = $(shell find $(SRC_DIR) -name '*.c')
+SOURCES = $(shell find $(SRC_DIR) -name '*.c' ! -name '*_test.c' -type f)
 OBJECTS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SOURCES))
 
 .PHONY: all clean run help

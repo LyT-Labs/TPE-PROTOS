@@ -22,28 +22,44 @@ void client_set_reply(struct socks5_conn *conn, uint8_t rep, uint8_t atyp, const
     conn->reply_atyp = atyp;
     memset(conn->reply_addr, 0, sizeof(conn->reply_addr));
     if (addr != NULL) {
-        memcpy(conn->reply_addr, addr, sizeof(uint8_t) * 4);
+        size_t copy_len = 4;  // IPv4
+        if (atyp == 0x04) {
+            copy_len = 16;  // IPv6
+        } else if (atyp == 0x03) {
+            copy_len = 1 + addr[0];
+            if (copy_len > sizeof(conn->reply_addr)) {
+                copy_len = sizeof(conn->reply_addr);
+            }
+        }
+        memcpy(conn->reply_addr, addr, copy_len);
     }
     conn->reply_port = port;
     conn->reply_ready = true;
 }
 
 void prepare_bound_addr(struct socks5_conn *conn) {
-    uint8_t addr[4] = {0, 0, 0, 0};
+    uint8_t addr[16] = {0};
     uint16_t port = 0;
+    uint8_t atyp = 0x01;  // IPv4
+    
     struct sockaddr_storage local;
     socklen_t len = sizeof(local);
+    
     if (getsockname(conn->origin_fd, (struct sockaddr *)&local, &len) == 0) {
         if (local.ss_family == AF_INET) {
             struct sockaddr_in *sin = (struct sockaddr_in *)&local;
             memcpy(addr, &sin->sin_addr, 4);
             port = ntohs(sin->sin_port);
+            atyp = 0x01;  // IPv4
         } else if (local.ss_family == AF_INET6) {
             struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&local;
+            memcpy(addr, &sin6->sin6_addr, 16);
             port = ntohs(sin6->sin6_port);
+            atyp = 0x04;  // IPv6
         }
     }
-    client_set_reply(conn, conn->reply_code, 0x01, addr, port);
+    
+    client_set_reply(conn, conn->reply_code, atyp, addr, port);
 }
 
 void client_build_reply(struct socks5_conn *conn) {
@@ -51,9 +67,8 @@ void client_build_reply(struct socks5_conn *conn) {
         return;
     }
 
-    uint8_t addr[4] = {0, 0, 0, 0};
-    memcpy(addr, conn->reply_addr, sizeof(addr));
-    request_marshall_reply(&conn->write_buf, conn->reply_code, conn->reply_atyp, addr, conn->reply_port);
+    request_marshall_reply(&conn->write_buf, conn->reply_code, conn->reply_atyp, 
+                          conn->reply_addr, conn->reply_port);
 }
 
 // ============================================================================

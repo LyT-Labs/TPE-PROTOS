@@ -13,6 +13,7 @@
 
 #include "echo_server.h"
 #include "../helpers/monitor.h"
+#include "../resolver/resolver.h"
 
 #define ECHO_DEFAULT_PORT 1080
 #define ECHO_BUFFER_SIZE  4096
@@ -275,6 +276,19 @@ int echo_server_main(int argc, char *argv[]) {
 
     printf("Echo-server no bloqueante escuchando en puerto %d\n", port);
 
+    // Inicializar el subsistema de resolución DNS asíncrona
+    if (!resolver_init(2)) {
+        fprintf(stderr, "Advertencia: no se pudo inicializar el resolver asíncrono\n");
+        fprintf(stderr, "Las resoluciones DNS podrían fallar.\n");
+    } else {
+        if (!resolver_register_notification_fd(sel)) {
+            fprintf(stderr, "Advertencia: no se pudo registrar el resolver en el selector\n");
+            resolver_destroy();
+        } else {
+            printf("Resolver DNS asíncrono inicializado (2 threads)\n");
+        }
+    }
+
     if (monitor_init(sel, "127.0.0.1", "9999") == -1) {
         fprintf(stderr, "Advertencia: no se pudo inicializar el monitor en puerto 9999\n");
         fprintf(stderr, "El servidor continuará sin monitoreo.\n");
@@ -290,6 +304,7 @@ int echo_server_main(int argc, char *argv[]) {
         }
     }
 
+    resolver_destroy();
     selector_destroy(sel);
     selector_close();
     close(server_fd);

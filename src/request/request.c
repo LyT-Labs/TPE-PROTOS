@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include "../socks5/socks5.h"
 #include "../tunnel/tunnel.h"
+#include "../resolver/resolver.h"
 
 // ============================================================================  
 // Tabla de transiciones del parser (por ahora vacía)
@@ -181,8 +182,16 @@ int request_marshall_reply(buffer *b, uint8_t rep, uint8_t atyp, const uint8_t *
     size_t space;
     uint8_t *ptr = buffer_write_ptr(b, &space);
 
-    // Al menos 10 bytes VER(1) REP(1) RSV(1) ATYP(1) ADDR(4) PORT(2)
-    if (space < 10) {
+    size_t addr_len = 4;
+    if (atyp == 0x04) {
+        addr_len = 16;
+    } else if (atyp == 0x03) {
+        addr_len = 1 + addr[0];
+    }
+    
+    size_t total_len = 4 + addr_len + 2;  // VER+REP+RSV+ATYP + ADDR + PORT
+    
+    if (space < total_len) {
         return -1;
     }
 
@@ -191,16 +200,13 @@ int request_marshall_reply(buffer *b, uint8_t rep, uint8_t atyp, const uint8_t *
     ptr[2] = 0x00;      // RSV
     ptr[3] = atyp;      // ATYP
 
-    // IPv4 address (4 bytes)
-    ptr[4] = addr[0];
-    ptr[5] = addr[1];
-    ptr[6] = addr[2];
-    ptr[7] = addr[3];
+    memcpy(ptr + 4, addr, addr_len);
+    
+    size_t port_offset = 4 + addr_len;
+    ptr[port_offset] = (uint8_t)((port >> 8) & 0xFF);
+    ptr[port_offset + 1] = (uint8_t)(port & 0xFF);
 
-    ptr[8] = (uint8_t)((port >> 8) & 0xFF);
-    ptr[9] = (uint8_t)(port & 0xFF);
-
-    buffer_write_adv(b, 10);
+    buffer_write_adv(b, total_len);
     return 0;
 }
 
@@ -230,6 +236,7 @@ void client_request_read_on_arrival(unsigned state, struct selector_key *key) {
 
     d->rb = &conn->read_buf;
     d->wb = &conn->write_buf;
+    d->resolving = false;
     request_parser_init(&d->parser);
 
     selector_set_interest_key(key, OP_READ);
@@ -299,9 +306,111 @@ unsigned client_request_read_on_read_ready(struct selector_key *key) {
     }
 }
 
+// ============================================================================
+// Callback de resolución DNS asíncrona
+// ============================================================================
+
+static void on_resolution_done(
+    struct selector_key *key,
+    enum resolver_status status,
+    struct addrinfo *result,
+    void *data
+) {
+    struct socks5_conn *conn = (struct socks5_conn *)data;
+    struct request_st *d = &conn->client.request;
+    
+    d->resolving = false;
+    
+    if (status != RESOLVER_SUCCESS || result == NULL) {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x04, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        return;
+    }
+    
+    struct addrinfo *rp;
+    int fd = -1;
+    int connect_result = -1;
+    
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd == -1) {
+            continue;
+        }
+
+        if (set_non_blocking(fd) == -1) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
+
+        connect_result = connect(fd, rp->ai_addr, rp->ai_addrlen);
+        
+        if (connect_result == 0 || (connect_result == -1 && errno == EINPROGRESS)) {
+            memcpy(&conn->origin_addr, rp->ai_addr, rp->ai_addrlen);
+            conn->origin_addr_len = rp->ai_addrlen;
+            break;
+        }
+        
+        close(fd);
+        fd = -1;
+    }
+    
+    resolver_free_result(result);
+    
+    if (fd == -1) {
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x04, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        return;
+    }
+
+    conn->origin_fd = fd;
+    
+    if (connect_result == 0) {
+        if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
+            close(fd);
+            conn->origin_fd = -1;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            client_set_reply(conn, 0x01, 0x01, addr, 0);
+            selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+            return;
+        }
+        conn->reply_code = 0x00;
+        prepare_bound_addr(conn);
+        conn->reply_ready = true;
+        conn->origin_stm.current = conn->origin_stm.states + O_CONNECTING;
+        if (conn->origin_stm.current->on_arrival != NULL) {
+            struct selector_key origin_key = {
+                .s = key->s,
+                .fd = fd,
+                .data = conn,
+            };
+            conn->origin_stm.current->on_arrival(O_CONNECTING, &origin_key);
+        }
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        selector_set_interest(key->s, fd, OP_NOOP);
+        return;
+    }
+
+    if (connect_result == -1 && errno == EINPROGRESS) {
+        if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
+            close(fd);
+            conn->origin_fd = -1;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            client_set_reply(conn, 0x01, 0x01, addr, 0);
+            selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+            return;
+        }
+        selector_set_interest(key->s, conn->client_fd, OP_NOOP);
+        return;
+    }
+}
+
 void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
     (void)state;
     struct socks5_conn *conn = key->data;
+    struct request_st *d = &conn->client.request;
 
     buffer_reset(&conn->write_buf);
     conn->reply_ready = false;
@@ -314,28 +423,44 @@ void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
         return;
     }
 
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%u", conn->req_port);
+
+    if (conn->req_atyp == 0x03) {
+        char host[256];
+        memcpy(host, conn->req_addr, conn->req_addr_len);
+        host[conn->req_addr_len] = '\0';
+        
+        d->resolving = true;
+        selector_set_interest(key->s, conn->client_fd, OP_NOOP);
+        
+        if (!resolver_request(key, host, portstr, on_resolution_done, conn)) {
+            d->resolving = false;
+            uint8_t addr[4] = {0, 0, 0, 0};
+            client_set_reply(conn, 0x01, 0x01, addr, 0);
+            selector_set_interest(key->s, conn->client_fd, OP_WRITE);
+        }
+        return;
+    }
+
     struct addrinfo hints;
     struct addrinfo *result = NULL;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    char portstr[16];
-    snprintf(portstr, sizeof(portstr), "%u", conn->req_port);
-
     int gai = 0;
-    if (conn->req_atyp == 0x03) {
-        char host[256];
-        memcpy(host, conn->req_addr, conn->req_addr_len);
-        host[conn->req_addr_len] = '\0';
-        gai = getaddrinfo(host, portstr, &hints, &result);
-    } else if (conn->req_atyp == 0x01) {
+    if (conn->req_atyp == 0x01) {
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, conn->req_addr, ip, sizeof(ip));
+        hints.ai_family = AF_INET;
+        hints.ai_flags = AI_NUMERICHOST;
         gai = getaddrinfo(ip, portstr, &hints, &result);
     } else if (conn->req_atyp == 0x04) {
         char ip[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, conn->req_addr, ip, sizeof(ip));
+        hints.ai_family = AF_INET6;
+        hints.ai_flags = AI_NUMERICHOST;
         gai = getaddrinfo(ip, portstr, &hints, &result);
     } else {
         uint8_t addr[4] = {0, 0, 0, 0};

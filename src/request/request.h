@@ -50,6 +50,7 @@ struct request_st {
     buffer *rb;
     buffer *wb;
     struct request_parser parser;
+    bool resolving;
 };
 
 // ===========================================================================
