@@ -43,7 +43,7 @@ clean:
 	@echo "✓ Archivos de compilación eliminados"
 
 run: $(ECHO_SERVER)
-	./$(ECHO_SERVER)
+	./$(ECHO_SERVER) $(ARGS)
 
 help:
 	@echo "Makefile para TPE-PROTOS - Servidor SOCKS5"
