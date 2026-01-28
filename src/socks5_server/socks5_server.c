@@ -12,21 +12,25 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#include "echo_server.h"
+#include "socks5_server.h"
 #include "../helpers/monitor.h"
 #include "../resolver/resolver.h"
 #include "../args/args.h"
 #include "../auth/auth.h"
 
-#define ECHO_DEFAULT_PORT 1080
-#define ECHO_BUFFER_SIZE  4096
+#define SOCKS5_DEFAULT_PORT 1080
+#define SOCKS5_BUFFER_SIZE  4096
+
+// Variable global para señal de terminación
+static volatile sig_atomic_t server_should_stop = 0;
+static fd_selector global_selector = NULL;
 
 struct echo_conn {
     int     fd;
     buffer  read_buf;
     buffer  write_buf;
-    uint8_t read_raw[ECHO_BUFFER_SIZE];
-    uint8_t write_raw[ECHO_BUFFER_SIZE];
+    uint8_t read_raw[SOCKS5_BUFFER_SIZE];
+    uint8_t write_raw[SOCKS5_BUFFER_SIZE];
 };
 
 static void accept_handler(struct selector_key *key);
@@ -192,11 +196,48 @@ static void echo_close(struct selector_key *key) {
     close(key->fd);
 }
 
-int echo_server_main(int argc, char *argv[]) {
+// Handler para señales de terminación
+static void signal_handler(int sig) {
+    (void)sig;  // Evitar warning de parámetro no usado
+    server_should_stop = 1;
+    // pselect retornará con EINTR, el loop verificará server_should_stop
+}
+
+// Configura los handlers de señales
+static int setup_signal_handlers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigaction SIGINT");
+        return -1;
+    }
+
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("sigaction SIGTERM");
+        return -1;
+    }
+
+    // Ignorar SIGPIPE (conexiones cerradas inesperadamente)
+    signal(SIGPIPE, SIG_IGN);
+
+    return 0;
+}
+
+int socks5_server_main(int argc, char *argv[]) {
     struct socks5args args;
     parse_args(argc, argv, &args);
 
     auth_set_users(args.users, MAX_USERS);
+
+    // Configurar manejadores de señales
+    if (setup_signal_handlers() == -1) {
+        fprintf(stderr, "Error: no se pudieron configurar los manejadores de señales\n");
+        return 1;
+    }
 
     const struct selector_init conf = {
         .signal = SIGALRM,
@@ -311,22 +352,32 @@ int echo_server_main(int argc, char *argv[]) {
         printf("Monitor de métricas escuchando en %s:%u\n", args.mng_addr, args.mng_port);
     }
 
-    while (1) {
+    printf("Servidor SOCKS5 escuchando. Presione Ctrl-C para detener.\n");
+
+    while (!server_should_stop) {
         st = selector_select(sel);
         if (st != SELECTOR_SUCCESS) {
-            fprintf(stderr, "selector_select: %s\n", selector_error(st));
+            if (!server_should_stop) {
+                fprintf(stderr, "selector_select: %s\n", selector_error(st));
+            }
             break;
         }
     }
 
+    printf("\nCerrando servidor...\n");
+
+    // Limpieza ordenada
+    global_selector = NULL;
     resolver_destroy();
     selector_destroy(sel);
     selector_close();
     close(server_fd);
 
+    printf("Servidor cerrado correctamente.\n");
+
     return EXIT_SUCCESS;
 }
 
 int main(int argc, char *argv[]) {
-    return echo_server_main(argc, argv);
+    return socks5_server_main(argc, argv);
 }
