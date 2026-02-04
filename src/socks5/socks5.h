@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <netdb.h>
 #include "../helpers/buffer.h"
 #include "../helpers/stm.h"
 #include "../helpers/selector.h"
@@ -16,6 +17,8 @@
 #include "../auth/auth.h"
 #include "../request/request.h"
 #include "../tunnel/tunnel.h"
+#include "../helpers/pop3_sniffer.h"
+#include "../helpers/http_sniffer.h"
 
 // ============================================================================
 // MAQUINAS DE ESTADO
@@ -99,6 +102,15 @@ struct socks5_conn {
 
     struct data_channel chan_c2o;
     struct data_channel chan_o2c;
+
+    enum { PROTO_NONE, PROTO_HTTP, PROTO_POP3 } sniff_protocol;
+    struct pop3_sniffer pop3_state;
+    struct http_sniffer http_state;
+    bool credentials_logged;
+
+    // DNS fallback: lista de direcciones pendientes de probar
+    struct addrinfo *addrinfo_list;      // lista completa (para liberar)
+    struct addrinfo *addrinfo_current;   // siguiente dirección a probar
 };
 
 

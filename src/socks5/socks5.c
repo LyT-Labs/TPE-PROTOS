@@ -177,6 +177,11 @@ struct socks5_conn *socks5_new(int client_fd) {
     strcpy(conn->username, "anonymous");
     conn->method_chosen = 0xFF;
 
+    conn->sniff_protocol = PROTO_NONE;
+    pop3_sniffer_init(&conn->pop3_state);
+    http_sniffer_init(&conn->http_state);
+    conn->credentials_logged = false;
+
     conn->client_stm.initial   = C_HELLO_READ;
     conn->client_stm.max_state = (sizeof(client_states) / sizeof(client_states[0])) - 1;
     conn->client_stm.states    = client_states;
@@ -294,6 +299,12 @@ static void socks5_close(struct selector_key *key) {
     }
 
     conn->closed = true;
+
+    if (conn->addrinfo_list != NULL) {
+        freeaddrinfo(conn->addrinfo_list);
+        conn->addrinfo_list = NULL;
+        conn->addrinfo_current = NULL;
+    }
 
     struct socks5_metrics *m = metrics_get();
     if (m->current_connections > 0) {
