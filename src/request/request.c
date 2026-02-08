@@ -361,9 +361,8 @@ static void on_resolution_done(
         fd = -1;
     }
     
-    resolver_free_result(result);
-    
     if (fd == -1) {
+        resolver_free_result(result);
         uint8_t addr[4] = {0, 0, 0, 0};
         client_set_reply(conn, 0x04, 0x01, addr, 0);
         selector_set_interest(key->s, conn->client_fd, OP_WRITE);
@@ -372,7 +371,16 @@ static void on_resolution_done(
 
     conn->origin_fd = fd;
     
-    if (connect_result == 0) {
+    // Determinar si fue conexión inmediata o EINPROGRESS
+    // (después del break, connect_result es 0 o -1 con EINPROGRESS)
+    bool immediate = (connect_result == 0);
+    
+    if (immediate) {
+        // Conexión inmediata — no necesitamos retry
+        resolver_free_result(result);
+        conn->addrinfo_list = NULL;
+        conn->addrinfo_current = NULL;
+        
         if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
             close(fd);
             conn->origin_fd = -1;
@@ -397,19 +405,23 @@ static void on_resolution_done(
         selector_set_interest(key->s, fd, OP_NOOP);
         return;
     }
-
-    if (connect_result == -1 && errno == EINPROGRESS) {
-        if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
-            close(fd);
-            conn->origin_fd = -1;
-            uint8_t addr[4] = {0, 0, 0, 0};
-            client_set_reply(conn, 0x01, 0x01, addr, 0);
-            selector_set_interest(key->s, conn->client_fd, OP_WRITE);
-            return;
-        }
-        selector_set_interest(key->s, conn->client_fd, OP_NOOP);
+    
+    // EINPROGRESS — guardar lista de direcciones para fallback
+    conn->addrinfo_list = result;
+    conn->addrinfo_current = (rp != NULL) ? rp->ai_next : NULL;
+    
+    if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
+        close(fd);
+        conn->origin_fd = -1;
+        resolver_free_result(result);
+        conn->addrinfo_list = NULL;
+        conn->addrinfo_current = NULL;
+        uint8_t addr[4] = {0, 0, 0, 0};
+        client_set_reply(conn, 0x01, 0x01, addr, 0);
+        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
         return;
     }
+    selector_set_interest(key->s, conn->client_fd, OP_NOOP);
 }
 
 void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
@@ -486,20 +498,38 @@ void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
         return;
     }
 
-    memcpy(&conn->origin_addr, result->ai_addr, result->ai_addrlen);
-    conn->origin_addr_len = result->ai_addrlen;
-    freeaddrinfo(result);
+    // Try all resolved addresses (similar to on_resolution_done)
+    struct addrinfo *rp;
+    int fd = -1;
+    int r = -1;
+    
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd == -1) {
+            continue;
+        }
 
-    const int fd = socket(conn->origin_addr.ss_family, SOCK_STREAM, 0);
-    if (fd < 0) {
-        uint8_t addr[4] = {0, 0, 0, 0};
-        client_set_reply(conn, 0x01, 0x01, addr, 0);
-        selector_set_interest(key->s, conn->client_fd, OP_WRITE);
-        return;
-    }
+        if (set_non_blocking(fd) == -1) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
 
-    if (set_non_blocking(fd) == -1) {
+        r = connect(fd, rp->ai_addr, rp->ai_addrlen);
+        
+        if (r == 0 || (r == -1 && errno == EINPROGRESS)) {
+            memcpy(&conn->origin_addr, rp->ai_addr, rp->ai_addrlen);
+            conn->origin_addr_len = rp->ai_addrlen;
+            break;
+        }
+        
         close(fd);
+        fd = -1;
+    }
+    
+    freeaddrinfo(result);
+    
+    if (fd == -1) {
         uint8_t addr[4] = {0, 0, 0, 0};
         client_set_reply(conn, 0x01, 0x01, addr, 0);
         selector_set_interest(key->s, conn->client_fd, OP_WRITE);
@@ -507,7 +537,6 @@ void client_request_write_on_arrival(unsigned state, struct selector_key *key) {
     }
 
     conn->origin_fd = fd;
-    const int r = connect(fd, (struct sockaddr *)&conn->origin_addr, conn->origin_addr_len);
     if (r == 0) {
         if (selector_register(key->s, fd, socks5_get_handler(), OP_WRITE, conn) != SELECTOR_SUCCESS) {
             close(fd);
