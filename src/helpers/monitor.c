@@ -20,6 +20,10 @@ struct monitor_client {
     size_t len;
     size_t sent;
     bool received_command;
+    
+    // Buffer acumulativo para comandos recibidos
+    char recv_buffer[1024];
+    size_t recv_len;
 };
 
 static void monitor_accept(struct selector_key *key);
@@ -214,16 +218,41 @@ static void monitor_client_read(struct selector_key *key) {
         return;
     }
 
-    mc->received_command = true;
-
-    char cmd_buffer[1024];
-    ssize_t n = recv(key->fd, cmd_buffer, sizeof(cmd_buffer) - 1, 0);
+    // Leer datos en el buffer acumulativo
+    ssize_t n = recv(key->fd, mc->recv_buffer + mc->recv_len, 
+                     sizeof(mc->recv_buffer) - mc->recv_len - 1, 0);
 
     if (n > 0) {
-        cmd_buffer[n] = '\0';
+        mc->recv_len += n;
+        mc->recv_buffer[mc->recv_len] = '\0';
+        
+        // Buscar línea completa (terminada en \n o \r\n)
+        char *newline = strchr(mc->recv_buffer, '\n');
+        if (newline == NULL) {
+            // No hay línea completa aún
+            if (mc->recv_len >= sizeof(mc->recv_buffer) - 1) {
+                // Buffer lleno sin newline = comando demasiado largo
+                const char *response = "ERROR: command too long\n";
+                size_t resp_len = strlen(response);
+                if (resp_len < sizeof(mc->buffer)) {
+                    memcpy(mc->buffer, response, resp_len);
+                    mc->len = resp_len;
+                    mc->sent = 0;
+                    mc->recv_len = 0;
+                    selector_set_interest(key->s, key->fd, OP_WRITE);
+                }
+            }
+            // Esperar más datos
+            return;
+        }
 
-        char *end = cmd_buffer + n - 1;
-        while (end >= cmd_buffer && (*end == '\r' || *end == '\n')) {
+        // Tenemos línea completa, procesarla
+        mc->received_command = true;
+        *newline = '\0';
+        
+        // Eliminar \r si existe
+        char *end = mc->recv_buffer + strlen(mc->recv_buffer) - 1;
+        while (end >= mc->recv_buffer && (*end == '\r' || *end == '\n')) {
             *end = '\0';
             end--;
         }
@@ -231,10 +260,11 @@ static void monitor_client_read(struct selector_key *key) {
         mc->len = 0;
         mc->sent = 0;
 
+        // Parsear comando
         char *tokens[3] = {NULL, NULL, NULL};
         int token_count = 0;
         char *saveptr = NULL;
-        char *token = strtok_r(cmd_buffer, " ", &saveptr);
+        char *token = strtok_r(mc->recv_buffer, " ", &saveptr);
         
         while (token != NULL && token_count < 3) {
             tokens[token_count++] = token;
@@ -291,6 +321,9 @@ static void monitor_client_read(struct selector_key *key) {
             }
         }
 
+        // Reset recv_buffer para próximo comando
+        mc->recv_len = 0;
+        
         selector_set_interest(key->s, key->fd, OP_WRITE);
 
     } else if (n == 0) {
