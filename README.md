@@ -1,83 +1,119 @@
-# TPE-PROTOS - Servidor Proxy SOCKS5
+# TPE Protocolos de Comunicación - Servidor Proxy SOCKSv5
 
-**ITBA Protocolos de Comunicación 2025/1 - Grupo 13**
+**ITBA - Protocolos de Comunicación 2025/2C - Grupo 13**
 
-Implementación de un servidor proxy SOCKS5 según RFC 1928.
+Implementación de un servidor proxy SOCKSv5 conforme a RFC 1928 y RFC 1929.
 
-## Estructura del Proyecto
+## Materiales de entrega
 
-```
-TPE-PROTOS/
-├── docs/                         # Documentación del proyecto
-├── src/                          # Código fuente
-│   ├── args/                     # Parsing de argumentos CLI
-│   ├── auth/                     # Autenticación SOCKS5
-│   ├── connect/                  # Lógica de conexión al servidor origen
-│   ├── echo_server/              # Servidor principal
-│   ├── hello/                    # Handshake inicial SOCKS5
-│   ├── helpers/                  # Utilidades (buffer, parser, selector, STM, metrics)
-│   ├── request/                  # Procesamiento de requests SOCKS5
-│   ├── resolver/                 # Resolución DNS asíncrona
-│   ├── socks5/                   # Núcleo del protocolo SOCKS5
-│   └── tunnel/                   # Túnel de datos bidireccional
-├── build/                        # Archivos objeto (.o) - generado
-├── bin/                          # Ejecutables compilados - generado
-├── Makefile                      # Sistema de compilación
-├── concurrent-test.py            # Script de pruebas de carga
-└── README.md                     # Este archivo
-```
+| Material | Ubicación |
+|---|---|
+| Informe del proyecto | [docs/Informe.pdf](docs/Informe.pdf) |
+| Protocolo de monitoreo | [docs/PROTOCOLO_MONITOR.md](docs/PROTOCOLO_MONITOR.md) |
+| Código fuente | `src/` |
+| Scripts de prueba | `tests/` |
+| Sistema de compilación | `Makefile` |
 
 ## Compilación
+
+Requisitos: GCC con soporte C11, POSIX threads.
 
 ```bash
 make
 ```
 
-Esto genera el ejecutable en `bin/echo_server` y los archivos objeto en `build/`.
+Genera los ejecutables en `bin/`:
+- `bin/socks5_server` — Servidor proxy SOCKSv5
+- `bin/monitor_client` — Cliente de monitoreo y configuración
 
-Para limpiar:
+Para limpiar archivos de compilación:
 ```bash
 make clean
 ```
 
-## Artefactos Generados
-
-- **`build/`**: Archivos objeto (.o)
-- **`bin/echo_server`**: Ejecutable del servidor
-
 ## Ejecución
 
-### Básico
-```bash
-./bin/echo_server
-```
-
-### Con opciones
-```bash
-./bin/echo_server -p 8080 -u admin:password
-```
-
-## Opciones de Línea de Comandos
-
-```
-  -h                    Imprime la ayuda
-  -l <SOCKS addr>       Dirección del proxy SOCKS (default: 0.0.0.0)
-  -p <SOCKS port>       Puerto SOCKS (default: 1080)
-  -L <conf addr>        Dirección del servicio de management (default: 127.0.0.1)
-  -P <conf port>        Puerto de configuración (default: 8080)
-  -u <name>:<pass>      Usuario y contraseña (hasta 10)
-  -v                    Versión
-```
-
-### Ejemplos
+### Servidor SOCKSv5
 
 ```bash
-# Puerto personalizado
-./bin/echo_server -p 9050
+./bin/socks5_server [opciones]
+```
+
+Opciones:
+```
+  -h                    Muestra la ayuda
+  -l <dirección>        Dirección de escucha del proxy (default: 0.0.0.0)
+  -p <puerto>           Puerto del proxy SOCKS (default: 1080)
+  -L <dirección>        Dirección del servicio de monitoreo (default: 127.0.0.1)
+  -P <puerto>           Puerto de monitoreo (default: 8080)
+  -u <usuario>:<clave>  Agrega un usuario (puede repetirse, hasta 10)
+  -v                    Muestra la versión
+```
+
+Ejemplos:
+```bash
+# Iniciar con puerto por defecto
+./bin/socks5_server
 
 # Con autenticación
-./bin/echo_server -u admin:pass123 -u user:abc
+./bin/socks5_server -u admin:pass123 -u guest:guest
 
-# Usando make
-make run ARGS="-p 8080"
+# Puerto personalizado y monitoreo abierto
+./bin/socks5_server -p 9050 -L 0.0.0.0 -P 9090
 ```
+
+### Cliente de monitoreo
+
+```bash
+./bin/monitor_client [opciones]
+```
+
+Opciones:
+```
+  (sin opciones)          Inicia interfaz interactiva (TUI)
+  -h <host>               Dirección del servidor (default: 127.0.0.1)
+  -p <puerto>             Puerto del servidor (default: 8080)
+  -c <comando>            Ejecuta un comando directo (sin interfaz)
+  -v                      Modo verbose
+  -V                      Muestra la versión
+  -?                      Muestra la ayuda
+```
+
+Ejemplos:
+```bash
+# Modo interactivo
+./bin/monitor_client
+
+# Ver métricas con netcat
+nc 127.0.0.1 8080
+
+# Agregar usuario en modo script
+./bin/monitor_client -c "ADDUSER bob clave123"
+
+# Reiniciar métricas
+./bin/monitor_client -c "RESET"
+```
+
+## Protocolo de monitoreo
+
+Protocolo de texto plano sobre TCP (puerto 8080 por defecto). Al conectarse, el servidor responde con las métricas actuales y queda a la espera de comandos.
+
+Comandos disponibles:
+- `RESET` — Reinicia las métricas a cero
+- `ADDUSER <usuario> <clave>` — Agrega un usuario al sistema de autenticación
+
+Documentación completa en [docs/PROTOCOLO_MONITOR.md](docs/PROTOCOLO_MONITOR.md).
+
+## Sniffing de credenciales
+
+El proxy inspecciona el tráfico y captura credenciales en tránsito para:
+- **POP3** (puerto 110): Comandos `USER` y `PASS`
+- **HTTP** (puertos 80/8080): Header `Authorization: Basic`
+
+Las credenciales capturadas se registran en `credentials.log`.
+Documentación completa en [docs/SNIFFING_CREDENCIALES.md](docs/SNIFFING_CREDENCIALES.md).
+
+## Registro de acceso
+
+Cada conexión a través del proxy se registra en `access.log` con timestamp, usuario, IP origen, destino y resultado, lo que permite a un administrador auditar los accesos.
+
