@@ -1,0 +1,210 @@
+Protocolo de Monitoreo y Configuración                         Grupo 13
+ITBA Protocolos de Comunicación 2025/2C                   12 Febrero 2026
+
+
+                 Protocolo de Monitoreo SOCKS5 v1.0
+
+
+1.  Introducción
+
+    Este documento especifica el protocolo de texto utilizado para
+    monitorear y configurar en tiempo de ejecución el servidor proxy
+    SOCKSv5.  El protocolo opera sobre TCP y permite consultar métricas
+    y administrar usuarios sin reiniciar el servidor.
+
+
+2.  Transporte y conexión
+
+    Puerto por defecto: 8080/tcp (configurable con -P).
+    Dirección por defecto: 127.0.0.1 (configurable con -L).
+
+    El servidor acepta conexiones TCP.  Al aceptar una conexión, el
+    servidor envía inmediatamente el bloque de métricas (sección 4)
+    y queda a la espera de un comando del cliente.
+
+    Tras enviar la respuesta al comando (o las métricas si no hubo
+    comando), el servidor cierra la conexión.  No hay sesiones
+    persistentes.
+
+
+3.  Formato de mensajes
+
+3.1.  Comandos (cliente -> servidor)
+
+    Un comando es una línea de texto ASCII terminada en LF (0x0A).
+    Se acepta también CRLF (0x0D 0x0A).  Los campos se separan por
+    un único espacio (0x20).  Longitud máxima: 1024 bytes.
+
+    Formato general:
+
+        COMANDO [arg1 [arg2]]\n
+
+    Los nombres de comando son sensibles a mayúsculas.
+
+3.2.  Respuestas (servidor -> cliente)
+
+    Las respuestas a comandos tienen el formato:
+
+        OK: <descripción>\n
+        ERROR: <descripción>\n
+
+    El bloque de métricas inicial (sección 4) tiene formato propio.
+
+
+4.  Métricas
+
+    Al establecerse la conexión, el servidor envía un bloque de texto
+    con las métricas actuales.  El formato es:
+
+        === SOCKS5 Server Metrics ===\n
+        \n
+        Connections:\n
+          total_connections:         <N>\n
+          current_connections:       <N>\n
+          max_concurrent_connections: <N>\n
+        \n
+        Data Transfer:\n
+          bytes_client_to_origin: <N>\n
+          bytes_origin_to_client: <N>\n
+        \n
+        Authentication:\n
+          auth_ok:                <N>\n
+          auth_fail:              <N>\n
+        \n
+        DNS Resolution:\n
+          dns_ok:                 <N>\n
+          dns_fail:               <N>\n
+        \n
+        Reply Codes:\n
+          rep[0xHH]:              <N>\n
+          ...\n
+        \n
+
+    Donde <N> es un entero decimal sin signo y 0xHH es el código de
+    respuesta SOCKS5 en hexadecimal.  Solo se incluyen códigos de
+    respuesta cuyo contador sea mayor a cero.
+
+    Descripción de cada métrica:
+
+    total_connections          Conexiones aceptadas desde el inicio
+                               (o último RESET).
+    current_connections        Conexiones activas en este instante.
+    max_concurrent_connections Máximo simultáneo alcanzado.
+    bytes_client_to_origin     Bytes transferidos del cliente al
+                               servidor destino.
+    bytes_origin_to_client     Bytes transferidos del servidor
+                               destino al cliente.
+    auth_ok                    Autenticaciones exitosas.
+    auth_fail                  Autenticaciones fallidas.
+    dns_ok                     Resoluciones DNS exitosas.
+    dns_fail                   Resoluciones DNS fallidas.
+    rep[0xHH]                  Cantidad de respuestas SOCKS5 con
+                               el código HH (ver RFC 1928 §6).
+
+    Las métricas son volátiles: se pierden al reiniciar el servidor.
+
+
+5.  Comandos
+
+5.1.  RESET
+
+    Reinicia todos los contadores de métricas a cero.  No afecta las
+    conexiones activas ni la tabla de usuarios.
+
+    Sintaxis:
+
+        RESET\n
+
+    Respuesta:
+
+        OK: metrics reset\n
+
+5.2.  ADDUSER
+
+    Agrega un usuario a la tabla de autenticación SOCKS5 (RFC 1929).
+
+    Sintaxis:
+
+        ADDUSER <usuario> <contraseña>\n
+
+    Restricciones:
+    - <usuario> y <contraseña> no pueden contener espacios.
+    - Longitud máxima de cada campo: 255 bytes.
+    - Capacidad máxima de la tabla: 10 usuarios.
+    - No se permiten usuarios duplicados.
+
+    Respuestas:
+
+        OK: user added\n                    Éxito.
+        ERROR: invalid username\n           Usuario vacío.
+        ERROR: user exists or table full\n  Duplicado o tabla llena.
+
+5.3.  Comando no reconocido
+
+    Si el comando no coincide con ninguno de los anteriores:
+
+        ERROR: unknown command\n
+
+5.4.  Comando demasiado largo
+
+    Si la línea excede 1024 bytes sin encontrar un terminador:
+
+        ERROR: command too long\n
+
+
+6.  Manejo de lecturas parciales
+
+    El servidor acumula los bytes recibidos en un buffer interno
+    (1024 bytes) hasta encontrar un LF.  No se asume que recv()
+    entrega una línea completa en una sola invocación.
+
+
+7.  Seguridad
+
+    El protocolo NO requiere autenticación.  Se recomienda:
+
+    - Escuchar solo en 127.0.0.1 (valor por defecto).
+    - Restringir acceso al puerto de monitoreo mediante firewall.
+    - Para administración remota, utilizar un túnel SSH:
+
+        ssh -L 8080:localhost:8080 usuario@servidor
+
+
+8.  Ejemplo de sesión
+
+    C: (establece conexión TCP a 127.0.0.1:8080)
+    S: === SOCKS5 Server Metrics ===
+    S:
+    S: Connections:
+    S:   total_connections:         42
+    S:   current_connections:       3
+    S:   max_concurrent_connections: 15
+    S:
+    S: Data Transfer:
+    S:   bytes_client_to_origin: 102400
+    S:   bytes_origin_to_client: 204800
+    S:
+    S: Authentication:
+    S:   auth_ok:                35
+    S:   auth_fail:              7
+    S:
+    S: DNS Resolution:
+    S:   dns_ok:                 20
+    S:   dns_fail:               2
+    S:
+    S: Reply Codes:
+    S:   rep[0x00]:              38
+    S:   rep[0x05]:              4
+    S:
+    C: ADDUSER alice s3cret\n
+    S: OK: user added\n
+    S: (cierra conexión)
+
+
+9.  Referencias
+
+    [RFC1928]  Leech, M. et al., "SOCKS Protocol Version 5",
+               RFC 1928, March 1996.
+
+    [RFC1929]  Leech, M., "Username/Password Authentication for
+               SOCKS V5", RFC 1929, March 1996.
