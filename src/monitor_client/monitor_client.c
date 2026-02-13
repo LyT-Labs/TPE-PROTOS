@@ -213,8 +213,8 @@ static void clear_screen(void) {
  */
 static void print_banner(const char *host, const char *port) {
     printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║         SOCKS5 Proxy - Cliente de Monitoreo v1.0            ║\n");
-    printf("║              ITBA Protocolos 2025/2C - Grupo 13             ║\n");
+    printf("║         SOCKS5 Proxy - Cliente de Monitoreo v1.0             ║\n");
+    printf("║              ITBA Protocolos 2025/2C - Grupo 13              ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n");
     printf("\n");
     printf("Conectado a: %s:%s\n", host, port);
@@ -372,7 +372,7 @@ static int interactive_mode(const struct client_config *config) {
                 if (read_input(confirm, sizeof(confirm)) != -1 && 
                     (strcmp(confirm, "s") == 0 || strcmp(confirm, "S") == 0)) {
                     printf("\n");
-                    execute_and_show(config->host, config->port, "RESET", config->verbose);
+                    execute_and_show(config->host, config->port, "RESET\n", config->verbose);
                 } else {
                     printf("\n❌ Operación cancelada\n");
                 }
