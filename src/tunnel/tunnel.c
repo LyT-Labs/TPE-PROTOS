@@ -190,8 +190,9 @@ enum tunnel_status channel_read(struct selector_key *key, struct data_channel *c
                              conn->req_addr[0], conn->req_addr[1],
                              conn->req_addr[2], conn->req_addr[3]);
                 } else if (conn->req_atyp == 0x03) {
-                    uint8_t len = conn->req_addr[0];
-                    memcpy(dst, &conn->req_addr[1], len);
+                    uint8_t len = conn->req_addr_len;
+                    if (len > sizeof(dst) - 1) len = sizeof(dst) - 1;
+                    memcpy(dst, conn->req_addr, len);
                     dst[len] = '\0';
                 } else if (conn->req_atyp == 0x04) {
                     inet_ntop(AF_INET6, conn->req_addr, dst, sizeof(dst));
